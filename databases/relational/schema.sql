@@ -57,12 +57,14 @@ CREATE TABLE national_rail_stations (
 ALTER TABLE metro_stations
     ADD CONSTRAINT fk_metro_interchange_rail
     FOREIGN KEY (interchange_national_rail_station_id)
-    REFERENCES national_rail_stations(station_id);
+    REFERENCES national_rail_stations(station_id)
+    DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE national_rail_stations
     ADD CONSTRAINT fk_rail_interchange_metro
     FOREIGN KEY (interchange_metro_station_id)
-    REFERENCES metro_stations(station_id);
+    REFERENCES metro_stations(station_id)
+    DEFERRABLE INITIALLY DEFERRED;
 
 -- Metro Schedules (8 schedules for 4 lines)
 CREATE TABLE metro_schedules (
@@ -198,7 +200,7 @@ CREATE TABLE metro_travel_history (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CHECK (amount_usd >= 0),
     CHECK (stops_travelled IS NULL OR stops_travelled > 0),
-    CHECK (status IN ('completed', 'refunded')),
+    CHECK (status IN ('completed', 'canceled')),
     CHECK (ticket_type IN ('single', 'day_pass'))
 );
 
@@ -259,15 +261,15 @@ CREATE INDEX idx_bookings_travel_date ON national_rail_bookings(travel_date);
 CREATE INDEX idx_bookings_status ON national_rail_bookings(status);
 CREATE INDEX idx_bookings_schedule ON national_rail_bookings(schedule_id);
 CREATE INDEX idx_bookings_user_date ON national_rail_bookings(user_id, travel_date);
-CREATE INDEX idx_bookings_origin ON national_rail_bookings(origin_id);
-CREATE INDEX idx_bookings_destination ON national_rail_bookings(destination_id);
+CREATE INDEX idx_bookings_origin ON national_rail_bookings(origin_station_id);
+CREATE INDEX idx_bookings_destination ON national_rail_bookings(destination_station_id);
 
 -- Metro Travel Indexes
 CREATE INDEX idx_metro_travel_user ON metro_travel_history(user_id);
 CREATE INDEX idx_metro_travel_date ON metro_travel_history(travel_date);
 CREATE INDEX idx_metro_travel_schedule ON metro_travel_history(schedule_id);
-CREATE INDEX idx_metro_travel_origin ON metro_travel_history(origin_id);
-CREATE INDEX idx_metro_travel_destination ON metro_travel_history(destination_id);
+CREATE INDEX idx_metro_travel_origin ON metro_travel_history(origin_station_id);
+CREATE INDEX idx_metro_travel_destination ON metro_travel_history(destination_station_id);
 
 -- Payment Indexes (Both FK columns)
 CREATE INDEX idx_payments_booking ON payments(national_rail_booking_id);
@@ -287,8 +289,8 @@ CREATE INDEX idx_metro_schedules_origin ON metro_schedules(origin_station_id);
 CREATE INDEX idx_metro_schedules_destination ON metro_schedules(destination_station_id);
 
 CREATE INDEX idx_rail_schedules_line ON national_rail_schedules(line);
-CREATE INDEX idx_rail_schedules_origin ON national_rail_schedules(origin_id);
-CREATE INDEX idx_rail_schedules_destination ON national_rail_schedules(destination_id);
+CREATE INDEX idx_rail_schedules_origin ON national_rail_schedules(origin_station_id);
+CREATE INDEX idx_rail_schedules_destination ON national_rail_schedules(destination_station_id);
 CREATE INDEX idx_rail_schedules_service_type ON national_rail_schedules(service_type);
 
 -- Seat Indexes
