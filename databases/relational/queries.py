@@ -1,6 +1,29 @@
 """
 TransitFlow — PostgreSQL / Relational Database Layer
 =====================================================
+This module handles all queries to PostgreSQL.
+
+TWO ROLES ARE SERVED HERE:
+  1. Relational  → dual-network transit (metro + national rail),
+                   availability, fares, bookings, seat selection
+  2. Vector      → policy document similarity search (pgvector)
+
+STUDENT TASK
+------------
+Design your schema in databases/relational/schema.sql, seed it with
+skeleton/seed_postgres.py, then implement the query functions below.
+
+Functions prefixed with `query_`  are read-only lookups called by the agent.
+Functions prefixed with `execute_` are write operations (booking/cancellation).
+
+The vector functions (query_policy_vector_search, store_policy_document)
+are already implemented — do not modify them.
+"""
+
+
+"""
+TransitFlow — PostgreSQL / Relational Database Layer
+=====================================================
 Handles core data access operations for both metro and national rail networks,
 including availability queries, fare calculation, booking transactions, and authentication.
 """
