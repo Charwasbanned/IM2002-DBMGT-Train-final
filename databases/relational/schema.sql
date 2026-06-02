@@ -283,8 +283,8 @@ CREATE INDEX idx_feedback_rating ON feedback(rating);
 
 -- Schedule Indexes
 CREATE INDEX idx_metro_schedules_line ON metro_schedules(line);
-CREATE INDEX idx_metro_schedules_origin ON metro_schedules(origin_id);
-CREATE INDEX idx_metro_schedules_destination ON metro_schedules(destination_id);
+CREATE INDEX idx_metro_schedules_origin ON metro_schedules(origin_station_id);
+CREATE INDEX idx_metro_schedules_destination ON metro_schedules(destination_station_id);
 
 CREATE INDEX idx_rail_schedules_line ON national_rail_schedules(line);
 CREATE INDEX idx_rail_schedules_origin ON national_rail_schedules(origin_id);
