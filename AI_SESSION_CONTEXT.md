@@ -383,13 +383,56 @@ CREATE INDEX IF NOT EXISTS idx_policy_embedding ON policy_documents USING hnsw (
 
 ```
 Node labels:
-- TODO
+- MetroStation       — 20 nodes, one per city metro station
+- NationalRailStation — 10 nodes, one per national rail station
+
+Node properties (MetroStation):
+  station_id                   : string  — e.g. "MS01" (unique, matches relational schema)
+  name                         : string  — e.g. "Central Square"
+  lines                        : list    — e.g. ["M1", "M2"]
+  is_interchange_metro         : boolean
+  interchange_metro_lines      : list    — metro lines that interchange here
+  is_interchange_national_rail : boolean
+
+Node properties (NationalRailStation):
+  station_id                       : string  — e.g. "NR01" (unique)
+  name                             : string  — e.g. "Central Station"
+  lines                            : list    — e.g. ["NR1", "NR2"]
+  is_interchange_national_rail     : boolean
+  interchange_national_rail_lines  : list
+  is_interchange_metro             : boolean
 
 Relationship types:
-- TODO
+- METRO_LINK       MetroStation → MetroStation
+                   properties: line (string), travel_time_min (int)
+                   Direction: one directed edge per adjacent_stations entry
+                   (both A→B and B→A edges exist — network is fully traversable)
 
-Key properties:
-- TODO
+- RAIL_LINK        NationalRailStation → NationalRailStation
+                   properties: line (string), travel_time_min (int)
+                   Same direction rule as METRO_LINK
+
+- INTERCHANGE_TO   MetroStation ↔ NationalRailStation (both directions stored)
+                   properties: NONE — the existence of the edge is the fact
+                   Cross-network transfer points:
+                     MS01 (Central Square)  ↔  NR01 (Central Station)
+                     MS07 (Old Town)        ↔  NR03 (Old Town Junction)
+                     MS15 (Ferndale)        ↔  NR07 (Ferndale Halt)
+
+Constraints:
+  CREATE CONSTRAINT metro_station_unique
+    FOR (s:MetroStation) REQUIRE s.station_id IS UNIQUE;
+  CREATE CONSTRAINT rail_station_unique
+    FOR (s:NationalRailStation) REQUIRE s.station_id IS UNIQUE;
+
+Path-finding notes for query implementation:
+- Use travel_time_min on METRO_LINK / RAIL_LINK as APOC dijkstra cost property.
+  INTERCHANGE_TO has no properties — pass defaultCost=5 in the APOC call:
+    apoc.algo.dijkstra(a, b, 'METRO_LINK|RAIL_LINK|INTERCHANGE_TO', 'travel_time_min', 5)
+- Variable-length traversal pattern for delay ripple (embed hops as f-string literal):
+    -[:METRO_LINK|RAIL_LINK|INTERCHANGE_TO*1..{hops}]-
+- "network" parameter ("metro" | "rail" | "auto") maps to which rel types
+  to include in the MATCH pattern. Infer "auto" from ID prefix: MS* = metro, NR* = rail.
 ```
 
 ## Function Signatures We Are Implementing
