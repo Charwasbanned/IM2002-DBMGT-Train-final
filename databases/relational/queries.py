@@ -233,6 +233,7 @@ def query_available_seats(
     Returns:
         list[dict]: Available physical layout properties array.
     """
+    fare_class = fare_class.lower()
     query = """
         SELECT s.seat_id, s.coach, s.fare_class, s.seat_row, s.seat_column
         FROM national_rail_seats s
@@ -403,94 +404,97 @@ def execute_booking(
     Returns:
         tuple[bool, dict | str]: Isolation status outcome binary wrapper with context information.
     """
+    fare_class = fare_class.lower()
     if seat_id.lower() == 'any':
         available = query_available_seats(schedule_id, travel_date, fare_class)
         if not available:
             return False, "No seats available for this journey."
         seat_id = auto_select_adjacent_seats(available, 1)[0]
 
-    with _connect() as conn:
-        conn.autocommit = False
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                lock_query = """
-                    SELECT coach FROM national_rail_seats
-                    WHERE schedule_id = %s AND seat_id = %s
-                    FOR UPDATE
-                """
-                cur.execute(lock_query, (schedule_id, seat_id))
-                seat_row = cur.fetchone()
-                if not seat_row:
-                    return False, f"Seat {seat_id} does not exist on this schedule."
-                coach = seat_row["coach"]
+    conn = _connect()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            lock_query = """
+                SELECT coach FROM national_rail_seats
+                WHERE schedule_id = %s AND seat_id = %s
+                FOR UPDATE
+            """
+            cur.execute(lock_query, (schedule_id, seat_id))
+            seat_row = cur.fetchone()
+            if not seat_row:
+                return False, f"Seat {seat_id} does not exist on this schedule."
+            coach = seat_row["coach"]
 
-                booked_query = """
-                    SELECT 1 FROM national_rail_bookings
-                    WHERE schedule_id = %s AND travel_date = %s AND seat_id = %s
-                    AND status IN ('confirmed', 'completed')
-                """
-                cur.execute(booked_query, (schedule_id, travel_date, seat_id))
-                if cur.fetchone():
-                    return False, f"Seat {seat_id} is already occupied on {travel_date}."
+            booked_query = """
+                SELECT 1 FROM national_rail_bookings
+                WHERE schedule_id = %s AND travel_date = %s AND seat_id = %s
+                AND status IN ('confirmed', 'completed')
+            """
+            cur.execute(booked_query, (schedule_id, travel_date, seat_id))
+            if cur.fetchone():
+                return False, f"Seat {seat_id} is already occupied on {travel_date}."
 
-                schedule_query = """
-                    SELECT stops_in_order, standard_base_fare_usd, standard_per_stop_rate_usd,
-                           first_base_fare_usd, first_per_stop_rate_usd, first_train_time
-                    FROM national_rail_schedules WHERE schedule_id = %s
-                """
-                cur.execute(schedule_query, (schedule_id,))
-                sched = cur.fetchone()
-                if not sched:
-                    return False, "Target schedule not found."
+            schedule_query = """
+                SELECT stops_in_order, standard_base_fare_usd, standard_per_stop_rate_usd,
+                       first_base_fare_usd, first_per_stop_rate_usd, first_train_time
+                FROM national_rail_schedules WHERE schedule_id = %s
+            """
+            cur.execute(schedule_query, (schedule_id,))
+            sched = cur.fetchone()
+            if not sched:
+                return False, "Target schedule not found."
 
-                stops: list = sched["stops_in_order"]
-                if origin_station_id not in stops or destination_station_id not in stops:
-                    return False, "Invalid origin or destination for this line."
-                
-                idx_origin = stops.index(origin_station_id)
-                idx_dest = stops.index(destination_station_id)
-                if idx_origin >= idx_dest:
-                    return False, "Invalid routing order."
+            stops: list = sched["stops_in_order"]
+            if origin_station_id not in stops or destination_station_id not in stops:
+                return False, "Invalid origin or destination for this line."
 
-                stops_travelled = idx_dest - idx_origin
+            idx_origin = stops.index(origin_station_id)
+            idx_dest = stops.index(destination_station_id)
+            if idx_origin >= idx_dest:
+                return False, "Invalid routing order."
 
-                if fare_class.lower() == 'first':
-                    base = float(sched['first_base_fare_usd'])
-                    rate = float(sched['first_per_stop_rate_usd'])
-                else:
-                    base = float(sched['standard_base_fare_usd'])
-                    rate = float(sched['standard_per_stop_rate_usd'])
-                amount_usd = base + (rate * stops_travelled)
+            stops_travelled = idx_dest - idx_origin
 
-                booking_id = _gen_booking_id()
-                insert_booking = """
-                    INSERT INTO national_rail_bookings (
-                        booking_id, user_id, schedule_id, origin_station_id, destination_station_id,
-                        travel_date, departure_time, ticket_type, fare_class, coach, seat_id,
-                        stops_travelled, amount_usd, status, booked_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    RETURNING *
-                """
-                cur.execute(insert_booking, (
+            if fare_class == 'first':
+                base = float(sched['first_base_fare_usd'])
+                rate = float(sched['first_per_stop_rate_usd'])
+            else:
+                base = float(sched['standard_base_fare_usd'])
+                rate = float(sched['standard_per_stop_rate_usd'])
+            amount_usd = base + (rate * stops_travelled)
+
+            booking_id = _gen_booking_id()
+            insert_booking = """
+                INSERT INTO national_rail_bookings (
                     booking_id, user_id, schedule_id, origin_station_id, destination_station_id,
-                    travel_date, sched["first_train_time"], ticket_type, fare_class, coach, seat_id,
-                    stops_travelled, amount_usd, 'confirmed'
-                ))
-                new_booking = dict(cur.fetchone())
+                    travel_date, departure_time, ticket_type, fare_class, coach, seat_id,
+                    stops_travelled, amount_usd, status, booked_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                RETURNING *
+            """
+            cur.execute(insert_booking, (
+                booking_id, user_id, schedule_id, origin_station_id, destination_station_id,
+                travel_date, sched["first_train_time"], ticket_type, fare_class, coach, seat_id,
+                stops_travelled, amount_usd, 'confirmed'
+            ))
+            new_booking = dict(cur.fetchone())
 
-                pay_id = f"PAY-{''.join(random.choices(string.ascii_uppercase + string.digits, k=6))}"
-                insert_payment = """
-                    INSERT INTO payments (payment_id, national_rail_booking_id, metro_trip_id, amount_usd, method, status, paid_at)
-                    VALUES (%s, %s, NULL, %s, 'credit_card', 'paid', NOW())
-                """
-                cur.execute(insert_payment, (pay_id, booking_id, amount_usd))
-                
-                conn.commit()
-                return True, new_booking
+            pay_id = f"PAY-{''.join(random.choices(string.ascii_uppercase + string.digits, k=6))}"
+            insert_payment = """
+                INSERT INTO payments (payment_id, national_rail_booking_id, metro_trip_id, amount_usd, method, status, paid_at)
+                VALUES (%s, %s, NULL, %s, 'credit_card', 'paid', NOW())
+            """
+            cur.execute(insert_payment, (pay_id, booking_id, amount_usd))
 
-        except Exception as e:
-            conn.rollback()
-            return False, f"Database transaction aborted: {str(e)}"
+        conn.commit()
+        return True, new_booking
+
+    except Exception as e:
+        conn.rollback()
+        return False, f"Database transaction aborted: {str(e)}"
+    finally:
+        conn.close()
 
 
 def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | str]:
@@ -504,36 +508,39 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
     Returns:
         tuple[bool, dict | str]: State updates outcome tracking indicator payload.
     """
-    with _connect() as conn:
-        conn.autocommit = False
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT status FROM national_rail_bookings 
-                    WHERE booking_id = %s AND user_id = %s FOR UPDATE
-                """, (booking_id, user_id))
-                booking = cur.fetchone()
-                
-                if not booking:
-                    return False, "Booking not found or access denied."
-                if booking["status"] == "cancelled" or booking["status"] == "refunded":
-                    return False, "Booking is already cancelled or refunded."
+    conn = _connect()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT status FROM national_rail_bookings
+                WHERE booking_id = %s AND user_id = %s FOR UPDATE
+            """, (booking_id, user_id))
+            booking = cur.fetchone()
 
-                cur.execute("""
-                    UPDATE national_rail_bookings SET status = 'cancelled' 
-                    WHERE booking_id = %s RETURNING *
-                """, (booking_id,))
-                updated_booking = dict(cur.fetchone())
+            if not booking:
+                return False, "Booking not found or access denied."
+            if booking["status"] == "cancelled" or booking["status"] == "refunded":
+                return False, "Booking is already cancelled or refunded."
 
-                cur.execute("""
-                    UPDATE payments SET status = 'refunded' WHERE national_rail_booking_id = %s
-                """, (booking_id,))
+            cur.execute("""
+                UPDATE national_rail_bookings SET status = 'cancelled'
+                WHERE booking_id = %s RETURNING *
+            """, (booking_id,))
+            updated_booking = dict(cur.fetchone())
 
-                conn.commit()
-                return True, updated_booking
-        except Exception as e:
-            conn.rollback()
-            return False, f"Cancellation failed: {str(e)}"
+            cur.execute("""
+                UPDATE payments SET status = 'refunded' WHERE national_rail_booking_id = %s
+            """, (booking_id,))
+
+        conn.commit()
+        return True, updated_booking
+
+    except Exception as e:
+        conn.rollback()
+        return False, f"Cancellation failed: {str(e)}"
+    finally:
+        conn.close()
 
 
 # ============================================================================
