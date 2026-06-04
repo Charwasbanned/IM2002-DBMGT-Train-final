@@ -728,15 +728,13 @@ def update_password(email: str, new_password: str) -> bool:
 #  PART 4: VECTOR OPERATIONS (RAG / Help Desk Lookup) — do not modify
 # ============================================================================
 
-def query_policy_vector_search(
-    embedding: list[float],
-    top_k: int = VECTOR_TOP_K,
-) -> list[dict]:
+def query_policy_vector_search(embedding: list[float], top_k: int = VECTOR_TOP_K) -> list[dict]:
     """
-    Perform a cosine similarity vector search against policy_documents.
-    Returns documents with similarity score above VECTOR_SIMILARITY_THRESHOLD.
+    Find the most relevant policy documents for a given query embedding.
 
-    Used by skeleton/agent.py to answer helpdesk questions. Do not modify.
+    Args:
+        embedding: Query vector from llm.embed(user_question)
+        top_k:     Number of results to return
 
     Returns:
         List of dicts with title, category, content, and similarity score
@@ -782,5 +780,4 @@ def store_policy_document(
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (title, category, content, vec_str, source_file))
-            new_id = cur.fetchone()[0]
-            return new_id
+            return cur.fetchone()[0]
