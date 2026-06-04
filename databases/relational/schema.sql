@@ -32,377 +32,321 @@
 -- ============================================================
 
 -- Metro Stations (20 stations across 4 lines)
-"""
-Seed PostgreSQL with all TransitFlow mock data from train-mock-data/.
+CREATE TABLE metro_stations (
+    station_id VARCHAR(10) PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    lines TEXT[] NOT NULL,
+    is_interchange_metro BOOLEAN DEFAULT FALSE,
+    is_interchange_national_rail BOOLEAN DEFAULT FALSE,
+    interchange_national_rail_station_id VARCHAR(10),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
-Usage:
-    python skeleton/seed_postgres.py
+-- National Rail Stations (10 stations across 2 lines)
+CREATE TABLE national_rail_stations (
+    station_id VARCHAR(10) PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    lines TEXT[] NOT NULL,
+    is_interchange_national_rail BOOLEAN DEFAULT FALSE,
+    is_interchange_metro BOOLEAN DEFAULT FALSE,
+    interchange_metro_station_id VARCHAR(10),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
-Run AFTER docker-compose up -d.
-You must first design and create your tables in databases/relational/schema.sql.
-Safe to re-run: implement your inserts with ON CONFLICT DO NOTHING.
-"""
+-- Add foreign key constraints for interchange stations
+ALTER TABLE metro_stations
+    ADD CONSTRAINT fk_metro_interchange_rail
+    FOREIGN KEY (interchange_national_rail_station_id)
+    REFERENCES national_rail_stations(station_id)
+    DEFERRABLE INITIALLY DEFERRED;
 
-import json
-import os
-import sys
+ALTER TABLE national_rail_stations
+    ADD CONSTRAINT fk_rail_interchange_metro
+    FOREIGN KEY (interchange_metro_station_id)
+    REFERENCES metro_stations(station_id)
+    DEFERRABLE INITIALLY DEFERRED;
 
-import psycopg2
-from psycopg2.extras import execute_values
-from argon2 import PasswordHasher
+-- Metro Schedules (8 schedules for 4 lines)
+CREATE TABLE metro_schedules (
+    schedule_id VARCHAR(20) PRIMARY KEY,
+    line VARCHAR(10) NOT NULL,
+    direction VARCHAR(20) NOT NULL,
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
+    stops_in_order TEXT[] NOT NULL,
+    first_train_time TIME NOT NULL,
+    last_train_time TIME NOT NULL,
+    travel_time_from_origin_min JSONB NOT NULL,
+    base_fare_usd NUMERIC(10,2) NOT NULL,
+    per_stop_rate_usd NUMERIC(10,2) NOT NULL,
+    frequency_min INTEGER NOT NULL,
+    operates_on TEXT[] NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (base_fare_usd >= 0),
+    CHECK (per_stop_rate_usd >= 0),
+    CHECK (frequency_min > 0)
+);
 
-# ── resolve paths ────────────────────────────────────────────────────────────
-SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
-DATA_DIR    = os.path.join(PROJECT_DIR, "train-mock-data")
+-- National Rail Schedules (8 schedules: 4 normal + 4 express)
+CREATE TABLE national_rail_schedules (
+    schedule_id VARCHAR(20) PRIMARY KEY,
+    line VARCHAR(10) NOT NULL,
+    service_type VARCHAR(20) NOT NULL,
+    direction VARCHAR(20) NOT NULL,
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
+    stops_in_order TEXT[] NOT NULL,
+    passed_through_stations TEXT[],
+    first_train_time TIME NOT NULL,
+    last_train_time TIME NOT NULL,
+    travel_time_from_origin_min JSONB NOT NULL,
+    standard_base_fare_usd NUMERIC(10,2) NOT NULL,
+    standard_per_stop_rate_usd NUMERIC(10,2) NOT NULL,
+    first_base_fare_usd NUMERIC(10,2) NOT NULL,
+    first_per_stop_rate_usd NUMERIC(10,2) NOT NULL,
+    frequency_min INTEGER NOT NULL,
+    operates_on TEXT[] NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (standard_base_fare_usd >= 0),
+    CHECK (standard_per_stop_rate_usd >= 0),
+    CHECK (first_base_fare_usd >= 0),
+    CHECK (first_per_stop_rate_usd >= 0),
+    CHECK (frequency_min > 0)
+);
 
-sys.path.insert(0, PROJECT_DIR)
-from skeleton import config as cfg
+-- National Rail Seats (Flattened structure - 1 table)
+CREATE TABLE national_rail_seats (
+    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id),
+    seat_id VARCHAR(10) NOT NULL,
+    coach VARCHAR(5) NOT NULL,
+    fare_class VARCHAR(20) NOT NULL,
+    seat_row INTEGER NOT NULL,
+    seat_column VARCHAR(2) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (schedule_id, seat_id),
+    CHECK (seat_row > 0),
+    CHECK (fare_class IN ('standard', 'first'))
+);
 
+-- ============================================================
+--  PART 2: USER TABLES
+-- ============================================================
 
-def load(filename):
-    with open(os.path.join(DATA_DIR, filename), encoding="utf-8") as f:
-        return json.load(f)
+-- Registered Users (Basic Information)
+CREATE TABLE registered_users (
+    user_id VARCHAR(10) PRIMARY KEY,
+    full_name VARCHAR(200) NOT NULL,
+    email VARCHAR(100) NOT NULL UNIQUE,
+    phone VARCHAR(20),
+    date_of_birth DATE,
+    registered_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
+-- User Credentials (Separated for Security)
+CREATE TABLE user_credentials (
+    user_id VARCHAR(10) PRIMARY KEY REFERENCES registered_users(user_id) ON DELETE CASCADE,
+    password_hash VARCHAR(255) NOT NULL,
+    secret_question TEXT,
+    secret_answer_hash VARCHAR(255),
+    last_password_change TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
-def connect():
-    return psycopg2.connect(
-        host=cfg.PG_HOST,
-        port=cfg.PG_PORT,
-        dbname=cfg.PG_DB,
-        user=cfg.PG_USER,
-        password=cfg.PG_PASSWORD,
+-- ============================================================
+--  PART 3: TRANSACTION TABLES
+-- ============================================================
+
+-- National Rail Bookings
+CREATE TABLE national_rail_bookings (
+    booking_id VARCHAR(20) PRIMARY KEY,
+    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id),
+    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id),
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
+    travel_date DATE NOT NULL,
+    departure_time TIME NOT NULL,
+    ticket_type VARCHAR(20) NOT NULL,
+    fare_class VARCHAR(20) NOT NULL,
+    coach VARCHAR(5) NOT NULL,
+    seat_id VARCHAR(10) NOT NULL,
+    stops_travelled INTEGER NOT NULL,
+    amount_usd NUMERIC(10,2) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    booked_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    travelled_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (amount_usd >= 0),
+    CHECK (stops_travelled > 0),
+    CHECK (status IN ('confirmed', 'completed', 'cancelled', 'refunded')),
+    CHECK (ticket_type IN ('single', 'return')),
+    CHECK (fare_class IN ('standard', 'first'))
+);
+
+-- Metro Travel History
+CREATE TABLE metro_travel_history (
+    trip_id VARCHAR(20) PRIMARY KEY,
+    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id),
+    schedule_id VARCHAR(20) NOT NULL REFERENCES metro_schedules(schedule_id),
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
+    travel_date DATE NOT NULL,
+    ticket_type VARCHAR(20) NOT NULL,
+    day_pass_ref VARCHAR(20),
+    stops_travelled INTEGER,
+    amount_usd NUMERIC(10,2) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    purchased_at TIMESTAMP WITH TIME ZONE,
+    travelled_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (amount_usd >= 0),
+    CHECK (stops_travelled IS NULL OR stops_travelled > 0),
+    CHECK (status IN ('completed', 'cancelled')),
+    CHECK (ticket_type IN ('single', 'day_pass'))
+);
+
+-- Self-referencing FK for day pass
+ALTER TABLE metro_travel_history
+    ADD CONSTRAINT fk_metro_day_pass
+    FOREIGN KEY (day_pass_ref)
+    REFERENCES metro_travel_history(trip_id)
+    ON DELETE SET NULL;
+
+-- Payments (Separate FK Columns for Polymorphic Association)
+CREATE TABLE payments (
+    payment_id VARCHAR(20) PRIMARY KEY,
+    national_rail_booking_id VARCHAR(20) REFERENCES national_rail_bookings(booking_id),
+    metro_trip_id VARCHAR(20) REFERENCES metro_travel_history(trip_id),
+    amount_usd NUMERIC(10,2) NOT NULL,
+    method VARCHAR(20) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    paid_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (amount_usd >= 0),
+    CHECK (method IN ('credit_card', 'debit_card', 'ewallet')),
+    CHECK (status IN ('paid', 'refunded', 'pending')),
+    CHECK (
+        (national_rail_booking_id IS NOT NULL AND metro_trip_id IS NULL) OR
+        (national_rail_booking_id IS NULL AND metro_trip_id IS NOT NULL)
     )
+);
 
-
-def insert_many(cur, table, columns, rows):
-    """Bulk insert with ON CONFLICT DO NOTHING. Returns row count inserted."""
-    if not rows:
-        return 0
-    sql = (
-        f"INSERT INTO {table} ({', '.join(columns)}) VALUES %s "
-        f"ON CONFLICT DO NOTHING"
+-- Feedback (Separate FK Columns for Polymorphic Association)
+CREATE TABLE feedback (
+    feedback_id VARCHAR(20) PRIMARY KEY,
+    national_rail_booking_id VARCHAR(20) REFERENCES national_rail_bookings(booking_id),
+    metro_trip_id VARCHAR(20) REFERENCES metro_travel_history(trip_id),
+    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id),
+    rating INTEGER NOT NULL,
+    comment TEXT,
+    submitted_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (rating >= 1 AND rating <= 5),
+    CHECK (
+        (national_rail_booking_id IS NOT NULL AND metro_trip_id IS NULL) OR
+        (national_rail_booking_id IS NULL AND metro_trip_id IS NOT NULL)
     )
-    execute_values(cur, sql, rows)
-    return cur.rowcount
+);
 
+-- ============================================================
+--  PART 4: INDEXES FOR PERFORMANCE
+-- ============================================================
 
-# ── seeders ──────────────────────────────────────────────────────────────────
+-- User Indexes
+CREATE INDEX idx_users_active ON registered_users(is_active);
 
-def seed_metro_stations(cur):
-    data = load("metro_stations.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    # Each item in `data` is a dict — inspect the JSON to see available fields.
-    rows = []
-    for s in data:
-        rows.append((
-            s.get("station_id"),
-            s.get("name"),
-            s.get("lines"),
-            s.get("is_interchange_metro", False),
-            s.get("is_interchange_national_rail", False),
-            s.get("interchange_national_rail_station_id"),
-        ))
-    inserted = insert_many(cur, "metro_stations",
-                           ["station_id", "name", "lines", "is_interchange_metro", "is_interchange_national_rail", "interchange_national_rail_station_id"],
-                           rows)
-    print(f"  metro_stations: inserted {inserted}")
+-- National Rail Booking Indexes
+CREATE INDEX idx_bookings_user ON national_rail_bookings(user_id);
+CREATE INDEX idx_bookings_travel_date ON national_rail_bookings(travel_date);
+CREATE INDEX idx_bookings_status ON national_rail_bookings(status);
+CREATE INDEX idx_bookings_schedule ON national_rail_bookings(schedule_id);
+CREATE INDEX idx_bookings_user_date ON national_rail_bookings(user_id, travel_date);
+CREATE INDEX idx_bookings_origin ON national_rail_bookings(origin_station_id);
+CREATE INDEX idx_bookings_destination ON national_rail_bookings(destination_station_id);
 
+-- Metro Travel Indexes
+CREATE INDEX idx_metro_travel_user ON metro_travel_history(user_id);
+CREATE INDEX idx_metro_travel_date ON metro_travel_history(travel_date);
+CREATE INDEX idx_metro_travel_schedule ON metro_travel_history(schedule_id);
+CREATE INDEX idx_metro_travel_origin ON metro_travel_history(origin_station_id);
+CREATE INDEX idx_metro_travel_destination ON metro_travel_history(destination_station_id);
 
-def seed_national_rail_stations(cur):
-    data = load("national_rail_stations.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    rows = []
-    for s in data:
-        rows.append((
-            s.get("station_id"),
-            s.get("name"),
-            s.get("lines"),
-            s.get("is_interchange_national_rail", False),
-            s.get("is_interchange_metro", False),
-            s.get("interchange_metro_station_id"),
-        ))
-    inserted = insert_many(cur, "national_rail_stations",
-                           ["station_id", "name", "lines", "is_interchange_national_rail", "is_interchange_metro", "interchange_metro_station_id"],
-                           rows)
-    print(f"  national_rail_stations: inserted {inserted}")
+-- Payment Indexes (Both FK columns)
+CREATE INDEX idx_payments_booking ON payments(national_rail_booking_id);
+CREATE INDEX idx_payments_trip ON payments(metro_trip_id);
+CREATE INDEX idx_payments_status ON payments(status);
+CREATE INDEX idx_payments_method ON payments(method);
 
+-- Feedback Indexes (Both FK columns)
+CREATE INDEX idx_feedback_booking ON feedback(national_rail_booking_id);
+CREATE INDEX idx_feedback_trip ON feedback(metro_trip_id);
+CREATE INDEX idx_feedback_user ON feedback(user_id);
+CREATE INDEX idx_feedback_rating ON feedback(rating);
 
-def seed_metro_schedules(cur):
-    data = load("metro_schedules.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    rows = []
-    for s in data:
-        rows.append((
-            s.get("schedule_id"),
-            s.get("line"),
-            s.get("direction"),
-            s.get("origin_station_id"),
-            s.get("destination_station_id"),
-            s.get("stops_in_order"),
-            s.get("first_train_time"),
-            s.get("last_train_time"),
-            json.dumps(s.get("travel_time_from_origin_min", {})),
-            s.get("base_fare_usd"),
-            s.get("per_stop_rate_usd"),
-            s.get("frequency_min"),
-            s.get("operates_on"),
-        ))
-    inserted = insert_many(cur, "metro_schedules",
-                           ["schedule_id", "line", "direction", "origin_station_id", "destination_station_id", "stops_in_order", "first_train_time", "last_train_time", "travel_time_from_origin_min", "base_fare_usd", "per_stop_rate_usd", "frequency_min", "operates_on"],
-                           rows)
-    print(f"  metro_schedules: inserted {inserted}")
+-- Schedule Indexes
+CREATE INDEX idx_metro_schedules_line ON metro_schedules(line);
+CREATE INDEX idx_metro_schedules_origin ON metro_schedules(origin_station_id);
+CREATE INDEX idx_metro_schedules_destination ON metro_schedules(destination_station_id);
 
+CREATE INDEX idx_rail_schedules_line ON national_rail_schedules(line);
+CREATE INDEX idx_rail_schedules_origin ON national_rail_schedules(origin_station_id);
+CREATE INDEX idx_rail_schedules_destination ON national_rail_schedules(destination_station_id);
+CREATE INDEX idx_rail_schedules_service_type ON national_rail_schedules(service_type);
 
-def seed_national_rail_schedules(cur):
-    data = load("national_rail_schedules.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    rows = []
-    for s in data:
-        fare_classes = s.get("fare_classes", {})
-        standard = fare_classes.get("standard", {})
-        first = fare_classes.get("first", {})
-        rows.append((
-            s.get("schedule_id"),
-            s.get("line"),
-            s.get("service_type"),
-            s.get("direction"),
-            s.get("origin_station_id"),
-            s.get("destination_station_id"),
-            s.get("stops_in_order"),
-            s.get("passed_through_stations"),
-            s.get("first_train_time"),
-            s.get("last_train_time"),
-            json.dumps(s.get("travel_time_from_origin_min", {})),
-            standard.get("base_fare_usd"),
-            standard.get("per_stop_rate_usd"),
-            first.get("base_fare_usd"),
-            first.get("per_stop_rate_usd"),
-            s.get("frequency_min"),
-            s.get("operates_on"),
-        ))
-    inserted = insert_many(cur, "national_rail_schedules",
-                           ["schedule_id", "line", "service_type", "direction", "origin_station_id", "destination_station_id", "stops_in_order", "passed_through_stations", "first_train_time", "last_train_time", "travel_time_from_origin_min", "standard_base_fare_usd", "standard_per_stop_rate_usd", "first_base_fare_usd", "first_per_stop_rate_usd", "frequency_min", "operates_on"],
-                           rows)
-    print(f"  national_rail_schedules: inserted {inserted}")
+-- Seat Indexes
+CREATE INDEX idx_seats_schedule ON national_rail_seats(schedule_id);
+CREATE INDEX idx_seats_fare_class ON national_rail_seats(fare_class);
 
+-- JSONB/Array Indexes for containment queries
+CREATE INDEX idx_metro_schedules_stops ON metro_schedules USING GIN (stops_in_order);
+CREATE INDEX idx_metro_schedules_operates ON metro_schedules USING GIN (operates_on);
+CREATE INDEX idx_rail_schedules_stops ON national_rail_schedules USING GIN (stops_in_order);
+CREATE INDEX idx_rail_schedules_operates ON national_rail_schedules USING GIN (operates_on);
 
-def seed_seat_layouts(cur):
-    data = load("national_rail_seat_layouts.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    rows = []
-    for layout in data:
-        schedule_id = layout.get("schedule_id")
-        for coach in layout.get("coaches", []):
-            coach_id = coach.get("coach")
-            fare_class = coach.get("fare_class")
-            for seat in coach.get("seats", []):
-                rows.append((
-                    schedule_id,
-                    seat.get("seat_id"),
-                    coach_id,
-                    fare_class,
-                    seat.get("row"),
-                    seat.get("column"),
-                ))
-    inserted = insert_many(cur, "national_rail_seats",
-                           ["schedule_id", "seat_id", "coach", "fare_class", "seat_row", "seat_column"],
-                           rows)
-    print(f"  national_rail_seats: inserted {inserted}")
+-- ============================================================
+--  PART 5: COMMENTS FOR DOCUMENTATION
+-- ============================================================
 
+COMMENT ON TABLE metro_stations IS 'City metro network stations (20 stations across 4 lines: M1, M2, M3, M4)';
+COMMENT ON TABLE national_rail_stations IS 'Intercity rail network stations (10 stations across 2 lines: NR1, NR2)';
+COMMENT ON TABLE metro_schedules IS 'Metro timetables with fare structure and JSONB stop sequences';
+COMMENT ON TABLE national_rail_schedules IS 'National rail timetables with normal and express services';
+COMMENT ON TABLE national_rail_seats IS 'Flattened seat layout (schedule + seat + coach in one table)';
+COMMENT ON TABLE registered_users IS 'User basic information (passwords stored separately in user_credentials)';
+COMMENT ON TABLE user_credentials IS 'Authentication data with argon2id password hashes';
+COMMENT ON TABLE national_rail_bookings IS 'Advance bookings for national rail with seat assignments';
+COMMENT ON TABLE metro_travel_history IS 'Same-day metro tap-in travel records';
+COMMENT ON TABLE payments IS 'Payment records with separate FK columns for bookings and trips';
+COMMENT ON TABLE feedback IS 'Post-travel passenger ratings and comments with separate FK columns';
 
-def seed_users(cur):
-    data = load("registered_users.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    user_rows = []
-    cred_rows = []
-    ph = PasswordHasher()
-    for u in data:
-        user_id = u.get("user_id")
-        full_name = u.get("full_name")
-        user_rows.append((
-            user_id,
-            full_name,
-            u.get("email"),
-            u.get("phone"),
-            u.get("date_of_birth"),
-            u.get("registered_at"),
-            u.get("is_active", True),
-        ))
+COMMENT ON COLUMN metro_schedules.stops_in_order IS 'Array of station IDs in travel order';
+COMMENT ON COLUMN metro_schedules.travel_time_from_origin_min IS 'JSONB map: {station_id: minutes_from_origin}';
+COMMENT ON COLUMN national_rail_schedules.passed_through_stations IS 'Stations passed but not stopped at (express services only)';
+COMMENT ON COLUMN user_credentials.password_hash IS 'argon2id hash (time_cost=2, memory_cost=65536, parallelism=2)';
+COMMENT ON COLUMN payments.national_rail_booking_id IS 'FK to national_rail_bookings (mutually exclusive with metro_trip_id)';
+COMMENT ON COLUMN payments.metro_trip_id IS 'FK to metro_travel_history (mutually exclusive with national_rail_booking_id)';
+COMMENT ON COLUMN registered_users.full_name IS 'Full display name (matches full_name field in registered_users.json mock data)';
+COMMENT ON COLUMN registered_users.date_of_birth IS 'Full date of birth (year_of_birth converted to YYYY-01-01 in Python)';
 
-        # Hash password and secret answer using argon2 (argon2-cffi)
-        pwd = u.get("password") or ""
-        try:
-            pwd_hash = ph.hash(pwd)
-        except Exception:
-            pwd_hash = None
-        secret_answer = u.get("secret_answer") or ""
-        try:
-            secret_hash = ph.hash(secret_answer)
-        except Exception:
-            secret_hash = None
-        cred_rows.append((
-            user_id,
-            pwd_hash,
-            u.get("secret_question"),
-            secret_hash,
-        ))
+-- ============================================================
+--  VECTOR SCHEMA  (RAG / Help Desk) — do not modify
+-- ============================================================
 
-    inserted_users = insert_many(cur, "registered_users",
-                                 ["user_id", "full_name", "email", "phone", "date_of_birth", "registered_at", "is_active"],
-                                 user_rows)
-    print(f"  registered_users: inserted {inserted_users}")
+CREATE EXTENSION IF NOT EXISTS vector;
 
-    inserted_creds = insert_many(cur, "user_credentials",
-                                 ["user_id", "password_hash", "secret_question", "secret_answer_hash"],
-                                 cred_rows)
-    print(f"  user_credentials: inserted {inserted_creds}")
+CREATE TABLE IF NOT EXISTS policy_documents (
+    id          SERIAL       PRIMARY KEY,
+    title       VARCHAR(200) NOT NULL,
+    category    VARCHAR(50)  NOT NULL,  -- 'refund', 'booking', 'conduct'
+    content     TEXT         NOT NULL,
+    -- 768-dim  → Ollama nomic-embed-text (default)
+    -- 3072-dim → Gemini gemini-embedding-001
+    -- If you switch LLM_PROVIDER to gemini, change to vector(3072) and reset the database.
+    embedding   vector(768),
+    source_file VARCHAR(200),
+    created_at  TIMESTAMPTZ  DEFAULT NOW()
+);
 
-
-def seed_national_rail_bookings(cur):
-    data = load("bookings.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    rows = []
-    for b in data:
-        rows.append((
-            b.get("booking_id"),
-            b.get("user_id"),
-            b.get("schedule_id"),
-            b.get("origin_station_id"),
-            b.get("destination_station_id"),
-            b.get("travel_date"),
-            b.get("departure_time"),
-            b.get("ticket_type"),
-            b.get("fare_class"),
-            b.get("coach"),
-            b.get("seat_id"),
-            b.get("stops_travelled"),
-            b.get("amount_usd"),
-            b.get("status"),
-            b.get("booked_at"),
-            b.get("travelled_at"),
-        ))
-    inserted = insert_many(cur, "national_rail_bookings",
-                           ["booking_id", "user_id", "schedule_id", "origin_station_id", "destination_station_id", "travel_date", "departure_time", "ticket_type", "fare_class", "coach", "seat_id", "stops_travelled", "amount_usd", "status", "booked_at", "travelled_at"],
-                           rows)
-    print(f"  national_rail_bookings: inserted {inserted}")
-
-
-def seed_metro_travels(cur):
-    data = load("metro_travel_history.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    rows = []
-    for t in data:
-        rows.append((
-            t.get("trip_id"),
-            t.get("user_id"),
-            t.get("schedule_id"),
-            t.get("origin_station_id"),
-            t.get("destination_station_id"),
-            t.get("travel_date"),
-            t.get("ticket_type"),
-            t.get("day_pass_ref"),
-            t.get("stops_travelled"),
-            t.get("amount_usd"),
-            t.get("status"),
-            t.get("purchased_at"),
-            t.get("travelled_at"),
-        ))
-    inserted = insert_many(cur, "metro_travel_history",
-                           ["trip_id", "user_id", "schedule_id", "origin_station_id", "destination_station_id", "travel_date", "ticket_type", "day_pass_ref", "stops_travelled", "amount_usd", "status", "purchased_at", "travelled_at"],
-                           rows)
-    print(f"  metro_travel_history: inserted {inserted}")
-
-
-def seed_payments(cur):
-    data = load("payments.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    rows = []
-    for p in data:
-        booking_ref = p.get("booking_id") or p.get("booking")
-        # determine whether booking_ref is a national rail booking (BK...) or metro trip (MT...)
-        national_rail_booking_id = None
-        metro_trip_id = None
-        if booking_ref:
-            if str(booking_ref).upper().startswith("BK"):
-                national_rail_booking_id = booking_ref
-            else:
-                metro_trip_id = booking_ref
-
-        rows.append((
-            p.get("payment_id"),
-            national_rail_booking_id,
-            metro_trip_id,
-            p.get("amount_usd"),
-            p.get("method"),
-            p.get("status"),
-            p.get("paid_at"),
-        ))
-    inserted = insert_many(cur, "payments",
-                           ["payment_id", "national_rail_booking_id", "metro_trip_id", "amount_usd", "method", "status", "paid_at"],
-                           rows)
-    print(f"  payments: inserted {inserted}")
-
-
-def seed_feedback(cur):
-    data = load("feedback.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    rows = []
-    for f in data:
-        booking_ref = f.get("booking_id")
-        national_rail_booking_id = None
-        metro_trip_id = None
-        if booking_ref:
-            if str(booking_ref).upper().startswith("BK"):
-                national_rail_booking_id = booking_ref
-            else:
-                metro_trip_id = booking_ref
-
-        rows.append((
-            f.get("feedback_id"),
-            national_rail_booking_id,
-            metro_trip_id,
-            f.get("user_id"),
-            f.get("rating"),
-            f.get("comment"),
-            f.get("submitted_at"),
-        ))
-    inserted = insert_many(cur, "feedback",
-                           ["feedback_id", "national_rail_booking_id", "metro_trip_id", "user_id", "rating", "comment", "submitted_at"],
-                           rows)
-    print(f"  feedback: inserted {inserted}")
-
-
-# ── main ─────────────────────────────────────────────────────────────────────
-
-def main():
-    print("Connecting to PostgreSQL...")
-    conn = connect()
-    conn.autocommit = False
-    cur = conn.cursor()
-
-    try:
-        print("Seeding tables (dependency order):")
-        seed_metro_stations(cur)
-        seed_national_rail_stations(cur)
-        seed_metro_schedules(cur)
-        seed_national_rail_schedules(cur)
-        seed_seat_layouts(cur)
-        seed_users(cur)
-        seed_national_rail_bookings(cur)
-        seed_metro_travels(cur)
-        seed_payments(cur)
-        seed_feedback(cur)
-        conn.commit()
-        print("\nAll done. Database seeded successfully.")
-    except Exception as e:
-        conn.rollback()
-        print(f"\nError: {e}")
-        raise
-    finally:
-        cur.close()
-        conn.close()
-
-
-if __name__ == "__main__":
-    main()
+-- Index for fast cosine similarity search
+CREATE INDEX IF NOT EXISTS idx_policy_embedding ON policy_documents USING hnsw (embedding vector_cosine_ops);
