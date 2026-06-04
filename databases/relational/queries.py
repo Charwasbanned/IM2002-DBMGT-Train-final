@@ -21,13 +21,6 @@ are already implemented — do not modify them.
 """
 
 
-"""
-TransitFlow — PostgreSQL / Relational Database Layer
-=====================================================
-Handles core data access operations for both metro and national rail networks,
-including availability queries, fare calculation, booking transactions, and authentication.
-"""
-
 from __future__ import annotations
 
 import json
@@ -40,6 +33,11 @@ import psycopg2
 import psycopg2.extras
 
 from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
+
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+ph = PasswordHasher(time_cost=2, memory_cost=65536, parallelism=2)
+
 
 
 def _connect():
@@ -254,6 +252,36 @@ def query_available_seats(
             return [dict(row) for row in cur.fetchall()]
 
 
+def auto_select_adjacent_seats(available_seats: list[dict], count: int) -> list[str]:
+    """
+    Select `count` seats that are as close together as possible (same row preferred,
+    then adjacent rows). Returns a list of seat_ids.
+
+    Args:
+        available_seats: output of query_available_seats()
+        count:           number of seats needed
+
+    Returns:
+        list[str]: list of selected seat_ids, up to `count` elements
+    """
+    if not available_seats or count <= 0:
+        return []
+    if count >= len(available_seats):
+        return [s["seat_id"] for s in available_seats[:count]]
+
+    from collections import defaultdict
+    rows: dict[int, list[dict]] = defaultdict(list)
+    for seat in available_seats:
+        rows[seat["seat_row"]].append(seat)
+
+    for row_seats in sorted(rows.values(), key=lambda s: s[0]["seat_row"]):
+        if len(row_seats) >= count:
+            return [s["seat_id"] for s in row_seats[:count]]
+
+    sorted_seats = sorted(available_seats, key=lambda s: (s["seat_row"], s["seat_column"]))
+    return [s["seat_id"] for s in sorted_seats[:count]]
+
+
 def query_user_profile(user_email: str) -> Optional[dict]:
     """
     Obtain primary profile entity attributes via unique identity email.
@@ -265,7 +293,7 @@ def query_user_profile(user_email: str) -> Optional[dict]:
         Optional[dict]: Core identity components mapping or None.
     """
     query = """
-        SELECT user_id, first_name, surname, email, phone, date_of_birth, registered_at, is_active
+        SELECT user_id, full_name, email, phone, date_of_birth, registered_at, is_active
         FROM registered_users
         WHERE email = %s
     """
@@ -294,11 +322,11 @@ def query_user_bookings(user_email: str) -> dict:
 
     rail_query = """
         SELECT booking_id, schedule_id, origin_station_id, destination_station_id,
-               travel_date, departure_time, ticket_type, fare_class, coach, seat_id,
+               travel_date, ticket_type, fare_class, coach, seat_id,
                stops_travelled, amount_usd, status, booked_at
         FROM national_rail_bookings
         WHERE user_id = %s
-        ORDER BY travel_date DESC, departure_time DESC
+        ORDER BY travel_date DESC, booked_at DESC
     """
     
     metro_query = """
@@ -306,7 +334,7 @@ def query_user_bookings(user_email: str) -> dict:
                travel_date, ticket_type, day_pass_ref, stops_travelled, amount_usd, status, travelled_at
         FROM metro_travel_history
         WHERE user_id = %s
-        ORDER BY travel_date DESC, travelled_at DESC
+        ORDER BY travel_date DESC, travelled_at DESC NULLS LAST
     """
 
     with _connect() as conn:
@@ -375,15 +403,33 @@ def execute_booking(
     Returns:
         tuple[bool, dict | str]: Isolation status outcome binary wrapper with context information.
     """
+    if seat_id.lower() == 'any':
+        available = query_available_seats(schedule_id, travel_date, fare_class)
+        if not available:
+            return False, "No seats available for this journey."
+        seat_id = auto_select_adjacent_seats(available, 1)[0]
+
     with _connect() as conn:
+        conn.autocommit = False
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                check_seat_query = """
-                    SELECT 1 FROM national_rail_bookings
-                    WHERE schedule_id = %s AND travel_date = %s AND seat_id = %s AND status IN ('confirmed', 'completed')
+                lock_query = """
+                    SELECT coach FROM national_rail_seats
+                    WHERE schedule_id = %s AND seat_id = %s
                     FOR UPDATE
                 """
-                cur.execute(check_seat_query, (schedule_id, travel_date, seat_id))
+                cur.execute(lock_query, (schedule_id, seat_id))
+                seat_row = cur.fetchone()
+                if not seat_row:
+                    return False, f"Seat {seat_id} does not exist on this schedule."
+                coach = seat_row["coach"]
+
+                booked_query = """
+                    SELECT 1 FROM national_rail_bookings
+                    WHERE schedule_id = %s AND travel_date = %s AND seat_id = %s
+                    AND status IN ('confirmed', 'completed')
+                """
+                cur.execute(booked_query, (schedule_id, travel_date, seat_id))
                 if cur.fetchone():
                     return False, f"Seat {seat_id} is already occupied on {travel_date}."
 
@@ -416,11 +462,6 @@ def execute_booking(
                     rate = float(sched['standard_per_stop_rate_usd'])
                 amount_usd = base + (rate * stops_travelled)
 
-                seat_query = "SELECT coach FROM national_rail_seats WHERE schedule_id = %s AND seat_id = %s"
-                cur.execute(seat_query, (schedule_id, seat_id))
-                seat_row = cur.fetchone()
-                coach = seat_row["coach"] if seat_row else "C1"
-
                 booking_id = _gen_booking_id()
                 insert_booking = """
                     INSERT INTO national_rail_bookings (
@@ -437,7 +478,7 @@ def execute_booking(
                 ))
                 new_booking = dict(cur.fetchone())
 
-                pay_id = f"PAY-{int(datetime.now().timestamp())}"
+                pay_id = f"PAY-{''.join(random.choices(string.ascii_uppercase + string.digits, k=6))}"
                 insert_payment = """
                     INSERT INTO payments (payment_id, national_rail_booking_id, metro_trip_id, amount_usd, method, status, paid_at)
                     VALUES (%s, %s, NULL, %s, 'credit_card', 'paid', NOW())
@@ -464,6 +505,7 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
         tuple[bool, dict | str]: State updates outcome tracking indicator payload.
     """
     with _connect() as conn:
+        conn.autocommit = False
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
@@ -523,22 +565,23 @@ def register_user(
         tuple[bool, str]: Completion monitoring tracking code outcome.
     """
     with _connect() as conn:
+        conn.autocommit = False
         try:
             with conn.cursor() as cur:
-                user_id = f"U{int(datetime.now().timestamp()) % 10000000:07d}"
+                user_id = f"U{''.join(random.choices(string.ascii_uppercase + string.digits, k=7))}"
                 dob_string = f"{year_of_birth}-01-01"
 
                 insert_profile = """
-                    INSERT INTO registered_users (user_id, first_name, surname, email, date_of_birth, registered_at)
-                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    INSERT INTO registered_users (user_id, full_name, email, date_of_birth, registered_at)
+                    VALUES (%s, %s, %s, %s, NOW())
                 """
-                cur.execute(insert_profile, (user_id, first_name, surname, email, dob_string))
+                cur.execute(insert_profile, (user_id, f"{first_name} {surname}", email, dob_string))
 
                 insert_cred = """
                     INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash)
                     VALUES (%s, %s, %s, %s)
                 """
-                cur.execute(insert_cred, (user_id, password, secret_question, secret_answer))
+                cur.execute(insert_cred, (user_id, ph.hash(password), secret_question, ph.hash(secret_answer)))
 
                 conn.commit()
                 return True, user_id
@@ -562,16 +605,26 @@ def login_user(email: str, password: str) -> Optional[dict]:
         Optional[dict]: Isolated target validation fields profile mapping block or None.
     """
     query = """
-        SELECT u.user_id, u.first_name, u.surname, u.email, u.is_active
-        FROM registered_users u
-        JOIN user_credentials c ON u.user_id = c.user_id
-        WHERE u.email = %s AND c.password_hash = %s AND u.is_active = TRUE
+    SELECT u.user_id, u.full_name, u.email, u.is_active, c.password_hash
+    FROM registered_users u
+    JOIN user_credentials c ON u.user_id = c.user_id
+    WHERE u.email = %s AND u.is_active = TRUE
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, (email, password))
+            cur.execute(query, (email,))
             row = cur.fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            
+            try:
+                ph.verify(row["password_hash"], password)
+            except VerifyMismatchError:
+                return None
+            
+            result = dict(row)
+            del result["password_hash"]
+            return result
 
 
 def get_user_secret_question(email: str) -> Optional[str]:
@@ -596,15 +649,21 @@ def verify_secret_answer(email: str, answer: str) -> bool:
     Evaluate validity of security response configurations.
     """
     query = """
-        SELECT 1 
-        FROM user_credentials c
-        JOIN registered_users u ON u.user_id = c.user_id
-        WHERE u.email = %s AND c.secret_answer_hash = %s
+    SELECT c.secret_answer_hash FROM user_credentials c
+    JOIN registered_users u ON u.user_id = c.user_id
+    WHERE u.email = %s
     """
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (email, answer))
-            return cur.fetchone() is not None
+            cur.execute(query, (email,))
+            row = cur.fetchone()
+            if not row:
+                return False
+            try:
+                ph.verify(row[0], answer)
+                return True
+            except VerifyMismatchError:
+                return False
 
 
 def update_password(email: str, new_password: str) -> bool:
@@ -618,8 +677,7 @@ def update_password(email: str, new_password: str) -> bool:
     """
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (new_password, email))
-            conn.commit()
+            cur.execute(query, (ph.hash(new_password), email))
             return cur.rowcount > 0
 
 
