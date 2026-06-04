@@ -48,9 +48,13 @@ def _connect():
 
 
 def _gen_booking_id() -> str:
-    """Generate a unique tracking identifier for rail bookings."""
     suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
     return f"BK-{suffix}"
+
+
+def _gen_payment_id() -> str:
+    suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    return f"PM-{suffix}"
 
 
 # ============================================================================
@@ -63,15 +67,13 @@ def query_national_rail_availability(
     travel_date: Optional[str] = None,
 ) -> list[dict]:
     """
-    Find available train schedules between two stations with correct routing sequence.
+    Return national rail schedules that serve both origin and destination stations
+    in the correct order, along with seat occupancy for the requested travel date.
 
     Args:
-        origin_id (str): Starting rail station identifier.
-        destination_id (str): Destination rail station identifier.
-        travel_date (Optional[str]): Target date string in YYYY-MM-DD format.
-
-    Returns:
-        list[dict]: Array of matching rows from national_rail_schedules, or [] if none found.
+        origin_id:       e.g. "NR01"
+        destination_id:  e.g. "NR05"
+        travel_date:     e.g. "2025-06-01" — used to count bookings; omit for general info
     """
     query = """
         SELECT 
@@ -89,7 +91,7 @@ def query_national_rail_availability(
     if travel_date:
         try:
             date_obj = datetime.strptime(travel_date, "%Y-%m-%d")
-            day_of_week = date_obj.strftime("%A")
+            day_of_week = date_obj.strftime("%a").lower()
             query += " AND %s = ANY(operates_on)"
             params.append(day_of_week)
         except ValueError:
@@ -99,12 +101,41 @@ def query_national_rail_availability(
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, tuple(params))
             results = cur.fetchall()
-            
+
             filtered_results = []
             for row in results:
                 stops = row["stops_in_order"]
                 if stops.index(origin_id) < stops.index(destination_id):
                     filtered_results.append(dict(row))
+
+            if travel_date and filtered_results:
+                schedule_ids = [r["schedule_id"] for r in filtered_results]
+
+                cur.execute("""
+                    SELECT schedule_id, COUNT(*) AS total_seats
+                    FROM national_rail_seats
+                    WHERE schedule_id = ANY(%s)
+                    GROUP BY schedule_id
+                """, (schedule_ids,))
+                total_map = {r["schedule_id"]: r["total_seats"] for r in cur.fetchall()}
+
+                cur.execute("""
+                    SELECT schedule_id, COUNT(*) AS booked_seats
+                    FROM national_rail_bookings
+                    WHERE schedule_id = ANY(%s) AND travel_date = %s
+                      AND status IN ('confirmed', 'completed')
+                    GROUP BY schedule_id
+                """, (schedule_ids, travel_date))
+                booked_map = {r["schedule_id"]: r["booked_seats"] for r in cur.fetchall()}
+
+                for r in filtered_results:
+                    sid = r["schedule_id"]
+                    total = int(total_map.get(sid, 0))
+                    booked = int(booked_map.get(sid, 0))
+                    r["total_seats"] = total
+                    r["booked_seats"] = booked
+                    r["available_seats"] = total - booked
+
             return filtered_results
 
 
@@ -114,15 +145,15 @@ def query_national_rail_fare(
     stops_travelled: int,
 ) -> Optional[dict]:
     """
-    Calculate fares dynamically based on stops travelled and seat tier classification.
+    Calculate the fare for a national rail journey.
 
     Args:
-        schedule_id (str): National rail schedule identification string.
-        fare_class (str): Chosen passenger class tier ('standard' or 'first').
-        stops_travelled (int): Sequence delta count between origin and destination.
+        schedule_id:     e.g. "NR_SCH01"
+        fare_class:      "standard" or "first"
+        stops_travelled: number of stops between origin and destination (inclusive)
 
     Returns:
-        Optional[dict]: Calculated fare breakdowns, or None if schedule does not exist.
+        dict with fare_class, base_fare_usd, per_stop_rate_usd, total_fare_usd
     """
     query = """
         SELECT standard_base_fare_usd, standard_per_stop_rate_usd, 
@@ -146,22 +177,20 @@ def query_national_rail_fare(
 
             total_fare = base + (rate * stops_travelled)
             return {
-                "base_fare": base,
-                "per_stop_rate": rate,
-                "total_fare": round(total_fare, 2)
+                "fare_class": fare_class.lower(),
+                "base_fare_usd": base,
+                "per_stop_rate_usd": rate,
+                "total_fare_usd": round(total_fare, 2)
             }
 
 
 def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
     """
-    Retrieve active metro line schedules configured between designated nodes.
+    Return metro schedules that serve both origin and destination in the correct order.
 
     Args:
-        origin_id (str): Transit gateway boarding point identifier.
-        destination_id (str): Transit gateway alighting point identifier.
-
-    Returns:
-        list[dict]: Array of matched schedules configured in sequential direction.
+        origin_id:       e.g. "MS01"
+        destination_id:  e.g. "MS09"
     """
     query = """
         SELECT schedule_id, line, direction, origin_station_id, destination_station_id,
@@ -186,14 +215,14 @@ def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
 
 def query_metro_fare(schedule_id: str, stops_travelled: int) -> Optional[dict]:
     """
-    Calculate metro flat rate increments based on station traversal delta counts.
+    Calculate the metro fare for a single-ticket journey.
 
     Args:
-        schedule_id (str): Target line schedule code token.
-        stops_travelled (int): Net number of segments crossed.
+        schedule_id:     e.g. "MS_SCH01"
+        stops_travelled: number of stops between origin and destination
 
     Returns:
-        Optional[dict]: Computed base, per-stop metrics, and aggregated total.
+        dict with base_fare_usd, per_stop_rate_usd, total_fare_usd
     """
     query = """
         SELECT base_fare_usd, per_stop_rate_usd
@@ -211,9 +240,9 @@ def query_metro_fare(schedule_id: str, stops_travelled: int) -> Optional[dict]:
             rate = float(row['per_stop_rate_usd'])
             total_fare = base + (rate * stops_travelled)
             return {
-                "base_fare": base,
-                "per_stop_rate": rate,
-                "total_fare": round(total_fare, 2)
+                "base_fare_usd": base,
+                "per_stop_rate_usd": rate,
+                "total_fare_usd": round(total_fare, 2)
             }
 
 
@@ -223,15 +252,15 @@ def query_available_seats(
     fare_class: str,
 ) -> list[dict]:
     """
-    Filter inventory allocation maps to isolate unreserved physical seats.
+    Return available seats for a national rail journey on a given date.
 
     Args:
-        schedule_id (str): Targeted transit line index.
-        travel_date (str): Iso formatted date matrix.
-        fare_class (str): Seat configuration class tier filter.
+        schedule_id:  e.g. "NR_SCH01"
+        travel_date:  e.g. "2025-06-01"
+        fare_class:   "standard" or "first"
 
     Returns:
-        list[dict]: Available physical layout properties array.
+        List of dicts: {seat_id, coach, row, column}
     """
     fare_class = fare_class.lower()
     query = """
@@ -261,9 +290,6 @@ def auto_select_adjacent_seats(available_seats: list[dict], count: int) -> list[
     Args:
         available_seats: output of query_available_seats()
         count:           number of seats needed
-
-    Returns:
-        list[str]: list of selected seat_ids, up to `count` elements
     """
     if not available_seats or count <= 0:
         return []
@@ -284,15 +310,7 @@ def auto_select_adjacent_seats(available_seats: list[dict], count: int) -> list[
 
 
 def query_user_profile(user_email: str) -> Optional[dict]:
-    """
-    Obtain primary profile entity attributes via unique identity email.
-
-    Args:
-        user_email (str): Target account authentication mail alias.
-
-    Returns:
-        Optional[dict]: Core identity components mapping or None.
-    """
+    """Return a user's profile by email."""
     query = """
         SELECT user_id, full_name, email, phone, date_of_birth, registered_at, is_active
         FROM registered_users
@@ -307,13 +325,10 @@ def query_user_profile(user_email: str) -> Optional[dict]:
 
 def query_user_bookings(user_email: str) -> dict:
     """
-    Compile historical ledger components across distinct multi-modal networks.
-
-    Args:
-        user_email (str): Target client validation mail token.
+    Return a user's combined booking history (national rail + metro).
 
     Returns:
-        dict: Aggregated ledger containing 'national_rail' and 'metro' branches.
+        dict with keys 'national_rail' (list) and 'metro' (list)
     """
     user_profile = query_user_profile(user_email)
     if not user_profile:
@@ -353,15 +368,7 @@ def query_user_bookings(user_email: str) -> dict:
 
 
 def query_payment_info(booking_id: str) -> Optional[dict]:
-    """
-    Examine financial transactions ledger to locate records linked to specific tokens.
-
-    Args:
-        booking_id (str): Core verification hash code string.
-
-    Returns:
-        Optional[dict]: Payment audit attributes trace row metadata mapping.
-    """
+    """Return payment record for a booking or metro trip."""
     query = """
         SELECT payment_id, national_rail_booking_id, metro_trip_id, amount_usd, method, status, paid_at
         FROM payments
@@ -389,20 +396,21 @@ def execute_booking(
     ticket_type: str = "single",
 ) -> tuple[bool, dict | str]:
     """
-    Execute booking flow by managing reservation updates and transactions safely.
+    Create a national rail booking for a logged-in user.
 
     Args:
-        user_id (str): Customer entity primary identifier token.
-        schedule_id (str): Targeted route transit run identifier.
-        origin_station_id (str): Initial boarding station locator.
-        destination_station_id (str): Final terminal arrival station locator.
-        travel_date (str): Manifest placement date constraint index.
-        fare_class (str): Target service cabin standard tier parameter string.
-        seat_id (str): Spatial asset structural deployment position string.
-        ticket_type (str): Ticket purchase variant default configuration string.
+        user_id:                e.g. "RU01" — must match the logged-in user
+        schedule_id:            e.g. "NR_SCH01"
+        origin_station_id:      e.g. "NR01"
+        destination_station_id: e.g. "NR05"
+        travel_date:            e.g. "2025-06-01"
+        fare_class:             "standard" or "first"
+        seat_id:                e.g. "B05" (or "any" to auto-assign)
+        ticket_type:            "single" (default) or "return"
 
     Returns:
-        tuple[bool, dict | str]: Isolation status outcome binary wrapper with context information.
+        (True, booking_dict)   on success
+        (False, error_message) on failure
     """
     fare_class = fare_class.lower()
     if seat_id.lower() == 'any':
@@ -480,7 +488,7 @@ def execute_booking(
             ))
             new_booking = dict(cur.fetchone())
 
-            pay_id = f"PAY-{''.join(random.choices(string.ascii_uppercase + string.digits, k=6))}"
+            pay_id = _gen_payment_id()
             insert_payment = """
                 INSERT INTO payments (payment_id, national_rail_booking_id, metro_trip_id, amount_usd, method, status, paid_at)
                 VALUES (%s, %s, NULL, %s, 'credit_card', 'paid', NOW())
@@ -499,29 +507,67 @@ def execute_booking(
 
 def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | str]:
     """
-    Cancel active manifest seats and coordinate transaction reversal.
+    Cancel a national rail booking owned by the given user.
+
+    Calculates the refund amount according to the booking's service type:
+      - Normal service: RF001 windows (100% / 75% / 50% / 0%)
+      - Express service: RF002 windows (100% / 50% / 0%)
 
     Args:
-        booking_id (str): Core target ledger item.
-        user_id (str): Verifiable owner profile verification code string.
+        booking_id: e.g. "BK001"
+        user_id:    must match the booking's user_id
 
     Returns:
-        tuple[bool, dict | str]: State updates outcome tracking indicator payload.
+        (True, result_dict)  with refund_amount_usd and policy note
+        (False, error_msg)
     """
     conn = _connect()
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT status FROM national_rail_bookings
-                WHERE booking_id = %s AND user_id = %s FOR UPDATE
+                SELECT b.status, b.amount_usd, b.travel_date, b.departure_time,
+                       s.service_type
+                FROM national_rail_bookings b
+                JOIN national_rail_schedules s ON b.schedule_id = s.schedule_id
+                WHERE b.booking_id = %s AND b.user_id = %s
+                FOR UPDATE OF b
             """, (booking_id, user_id))
             booking = cur.fetchone()
 
             if not booking:
                 return False, "Booking not found or access denied."
-            if booking["status"] == "cancelled" or booking["status"] == "refunded":
+            if booking["status"] in ("cancelled", "refunded"):
                 return False, "Booking is already cancelled or refunded."
+
+            # Calculate hours until departure
+            departure_dt = datetime.combine(booking["travel_date"], booking["departure_time"])
+            hours_until = (departure_dt - datetime.now()).total_seconds() / 3600
+
+            amount = float(booking["amount_usd"])
+            service_type = (booking["service_type"] or "normal").lower()
+
+            # Apply refund policy
+            if service_type == "express":
+                # RF002
+                if hours_until >= 48:
+                    refund_pct, admin_fee, policy_note = 1.0, 1.00, "RF002_W1: 100% refund (>=48h), admin fee $1.00"
+                elif hours_until >= 24:
+                    refund_pct, admin_fee, policy_note = 0.5, 1.00, "RF002_W2: 50% refund (24-48h), admin fee $1.00"
+                else:
+                    refund_pct, admin_fee, policy_note = 0.0, 0.00, "RF002_W3: No refund (<24h)"
+            else:
+                # RF001 (normal)
+                if hours_until >= 48:
+                    refund_pct, admin_fee, policy_note = 1.0, 0.00, "RF001_W1: 100% refund (>=48h), no admin fee"
+                elif hours_until >= 24:
+                    refund_pct, admin_fee, policy_note = 0.75, 0.50, "RF001_W2: 75% refund (24-48h), admin fee $0.50"
+                elif hours_until >= 2:
+                    refund_pct, admin_fee, policy_note = 0.5, 0.50, "RF001_W3: 50% refund (2-24h), admin fee $0.50"
+                else:
+                    refund_pct, admin_fee, policy_note = 0.0, 0.00, "RF001_W4: No refund (<2h)"
+
+            refund_amount = round(max(amount * refund_pct - admin_fee, 0), 2)
 
             cur.execute("""
                 UPDATE national_rail_bookings SET status = 'cancelled'
@@ -534,7 +580,11 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
             """, (booking_id,))
 
         conn.commit()
-        return True, updated_booking
+        return True, {
+            **updated_booking,
+            "refund_amount_usd": refund_amount,
+            "policy_note": policy_note,
+        }
 
     except Exception as e:
         conn.rollback()
@@ -557,62 +607,51 @@ def register_user(
     secret_answer: str,
 ) -> tuple[bool, str]:
     """
-    Provision systemic identity credentials across database allocation maps.
+    Register a new user.
+    Returns (True, user_id) on success or (False, error_message) on failure.
 
-    Args:
-        email (str): Target unique entry communication handle string.
-        first_name (str): Core name parameter metadata.
-        surname (str): Secondary identity text notation format parameter.
-        year_of_birth (int): Numerical year converted into standard ISO calendar string.
-        password (str): Target credentials password hash value string.
-        secret_question (str): Backup restoration security textual component template.
-        secret_answer (str): Validation key target parameter validation string.
-
-    Returns:
-        tuple[bool, str]: Completion monitoring tracking code outcome.
+    NOTE: passwords are stored as plain text here intentionally for teaching
+    purposes. In production, replace with a salted hash (e.g. bcrypt).
     """
-    with _connect() as conn:
-        conn.autocommit = False
-        try:
-            with conn.cursor() as cur:
-                user_id = f"U{''.join(random.choices(string.ascii_uppercase + string.digits, k=7))}"
-                dob_string = f"{year_of_birth}-01-01"
+    conn = _connect()
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            user_id = f"U{''.join(random.choices(string.ascii_uppercase + string.digits, k=7))}"
+            dob_string = f"{year_of_birth}-01-01"
 
-                insert_profile = """
-                    INSERT INTO registered_users (user_id, full_name, email, date_of_birth, registered_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                """
-                cur.execute(insert_profile, (user_id, f"{first_name} {surname}", email, dob_string))
+            insert_profile = """
+                INSERT INTO registered_users (user_id, full_name, email, date_of_birth, registered_at)
+                VALUES (%s, %s, %s, %s, NOW())
+            """
+            cur.execute(insert_profile, (user_id, f"{first_name} {surname}", email, dob_string))
 
-                insert_cred = """
-                    INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash)
-                    VALUES (%s, %s, %s, %s)
-                """
-                cur.execute(insert_cred, (user_id, ph.hash(password), secret_question, ph.hash(secret_answer)))
+            insert_cred = """
+                INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash)
+                VALUES (%s, %s, %s, %s)
+            """
+            cur.execute(insert_cred, (user_id, ph.hash(password), secret_question, ph.hash(secret_answer)))
 
-                conn.commit()
-                return True, user_id
-        except psycopg2.IntegrityError:
-            conn.rollback()
-            return False, "A user account with this email already exists."
-        except Exception as e:
-            conn.rollback()
-            return False, f"Registration pipeline error: {str(e)}"
+        conn.commit()
+        return True, user_id
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return False, "A user account with this email already exists."
+    except Exception as e:
+        conn.rollback()
+        return False, f"Registration pipeline error: {str(e)}"
+    finally:
+        conn.close()
 
 
 def login_user(email: str, password: str) -> Optional[dict]:
     """
-    Authenticate inbound customer signatures against stored profile structures.
-
-    Args:
-        email (str): Validation email token target.
-        password (str): Input signature validation entity hash parameter.
-
-    Returns:
-        Optional[dict]: Isolated target validation fields profile mapping block or None.
+    Verify credentials. Returns a user dict on success or None on failure.
+    Dict keys: user_id, email, full_name, first_name, surname, phone, date_of_birth, is_active.
     """
     query = """
-    SELECT u.user_id, u.full_name, u.email, u.is_active, c.password_hash
+    SELECT u.user_id, u.full_name, u.email, u.phone, u.date_of_birth, u.is_active,
+           c.password_hash
     FROM registered_users u
     JOIN user_credentials c ON u.user_id = c.user_id
     WHERE u.email = %s AND u.is_active = TRUE
@@ -623,21 +662,22 @@ def login_user(email: str, password: str) -> Optional[dict]:
             row = cur.fetchone()
             if not row:
                 return None
-            
+
             try:
                 ph.verify(row["password_hash"], password)
             except VerifyMismatchError:
                 return None
-            
+
             result = dict(row)
             del result["password_hash"]
+            name_parts = result["full_name"].split(" ", 1)
+            result["first_name"] = name_parts[0]
+            result["surname"] = name_parts[1] if len(name_parts) > 1 else ""
             return result
 
 
 def get_user_secret_question(email: str) -> Optional[str]:
-    """
-    Acquire recovery challenges mapped to target account labels.
-    """
+    """Return the secret question for a registered email, or None if not found."""
     query = """
         SELECT c.secret_question 
         FROM user_credentials c
@@ -652,9 +692,7 @@ def get_user_secret_question(email: str) -> Optional[str]:
 
 
 def verify_secret_answer(email: str, answer: str) -> bool:
-    """
-    Evaluate validity of security response configurations.
-    """
+    """Return True if the provided answer matches the stored secret answer (case-insensitive)."""
     query = """
     SELECT c.secret_answer_hash FROM user_credentials c
     JOIN registered_users u ON u.user_id = c.user_id
@@ -674,9 +712,7 @@ def verify_secret_answer(email: str, answer: str) -> bool:
 
 
 def update_password(email: str, new_password: str) -> bool:
-    """
-    Modify operational system entity secret records safely.
-    """
+    """Update the password for a user. Returns True if the row was updated."""
     query = """
         UPDATE user_credentials 
         SET password_hash = %s, last_password_change = NOW()
