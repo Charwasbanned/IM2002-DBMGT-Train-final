@@ -106,7 +106,9 @@ CREATE TABLE national_rail_schedules (
     operates_on TEXT[] NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CHECK (standard_base_fare_usd >= 0),
+    CHECK (standard_per_stop_rate_usd >= 0),
     CHECK (first_base_fare_usd >= 0),
+    CHECK (first_per_stop_rate_usd >= 0),
     CHECK (frequency_min > 0)
 );
 
@@ -120,7 +122,8 @@ CREATE TABLE national_rail_seats (
     seat_column VARCHAR(2) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (schedule_id, seat_id),
-    CHECK (seat_row > 0)
+    CHECK (seat_row > 0),
+    CHECK (fare_class IN ('standard', 'first'))
 );
 
 -- ============================================================
@@ -130,8 +133,7 @@ CREATE TABLE national_rail_seats (
 -- Registered Users (Basic Information)
 CREATE TABLE registered_users (
     user_id VARCHAR(10) PRIMARY KEY,
-    first_name VARCHAR(100) NOT NULL,
-    surname VARCHAR(100) NOT NULL,
+    full_name VARCHAR(200) NOT NULL,
     email VARCHAR(100) NOT NULL UNIQUE,
     phone VARCHAR(20),
     date_of_birth DATE,
@@ -250,7 +252,6 @@ CREATE TABLE feedback (
 -- ============================================================
 
 -- User Indexes
-CREATE INDEX idx_users_email ON registered_users(email);
 CREATE INDEX idx_users_active ON registered_users(is_active);
 
 -- National Rail Booking Indexes
@@ -259,15 +260,15 @@ CREATE INDEX idx_bookings_travel_date ON national_rail_bookings(travel_date);
 CREATE INDEX idx_bookings_status ON national_rail_bookings(status);
 CREATE INDEX idx_bookings_schedule ON national_rail_bookings(schedule_id);
 CREATE INDEX idx_bookings_user_date ON national_rail_bookings(user_id, travel_date);
-CREATE INDEX idx_bookings_origin ON national_rail_bookings(origin_id);
-CREATE INDEX idx_bookings_destination ON national_rail_bookings(destination_id);
+CREATE INDEX idx_bookings_origin ON national_rail_bookings(origin_station_id);
+CREATE INDEX idx_bookings_destination ON national_rail_bookings(destination_station_id);
 
 -- Metro Travel Indexes
 CREATE INDEX idx_metro_travel_user ON metro_travel_history(user_id);
 CREATE INDEX idx_metro_travel_date ON metro_travel_history(travel_date);
 CREATE INDEX idx_metro_travel_schedule ON metro_travel_history(schedule_id);
-CREATE INDEX idx_metro_travel_origin ON metro_travel_history(origin_id);
-CREATE INDEX idx_metro_travel_destination ON metro_travel_history(destination_id);
+CREATE INDEX idx_metro_travel_origin ON metro_travel_history(origin_station_id);
+CREATE INDEX idx_metro_travel_destination ON metro_travel_history(destination_station_id);
 
 -- Payment Indexes (Both FK columns)
 CREATE INDEX idx_payments_booking ON payments(national_rail_booking_id);
@@ -287,8 +288,8 @@ CREATE INDEX idx_metro_schedules_origin ON metro_schedules(origin_station_id);
 CREATE INDEX idx_metro_schedules_destination ON metro_schedules(destination_station_id);
 
 CREATE INDEX idx_rail_schedules_line ON national_rail_schedules(line);
-CREATE INDEX idx_rail_schedules_origin ON national_rail_schedules(origin_id);
-CREATE INDEX idx_rail_schedules_destination ON national_rail_schedules(destination_id);
+CREATE INDEX idx_rail_schedules_origin ON national_rail_schedules(origin_station_id);
+CREATE INDEX idx_rail_schedules_destination ON national_rail_schedules(destination_station_id);
 CREATE INDEX idx_rail_schedules_service_type ON national_rail_schedules(service_type);
 
 -- Seat Indexes
@@ -323,8 +324,7 @@ COMMENT ON COLUMN national_rail_schedules.passed_through_stations IS 'Stations p
 COMMENT ON COLUMN user_credentials.password_hash IS 'argon2id hash (time_cost=2, memory_cost=65536, parallelism=2)';
 COMMENT ON COLUMN payments.national_rail_booking_id IS 'FK to national_rail_bookings (mutually exclusive with metro_trip_id)';
 COMMENT ON COLUMN payments.metro_trip_id IS 'FK to metro_travel_history (mutually exclusive with national_rail_booking_id)';
-COMMENT ON COLUMN registered_users.first_name IS 'User first name (matches register_user function signature)';
-COMMENT ON COLUMN registered_users.surname IS 'User surname (matches register_user function signature)';
+COMMENT ON COLUMN registered_users.full_name IS 'Full display name (matches full_name field in registered_users.json mock data)';
 COMMENT ON COLUMN registered_users.date_of_birth IS 'Full date of birth (year_of_birth converted to YYYY-01-01 in Python)';
 
 -- ============================================================
