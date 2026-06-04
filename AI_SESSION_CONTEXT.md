@@ -130,7 +130,9 @@ CREATE TABLE national_rail_schedules (
     operates_on TEXT[] NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CHECK (standard_base_fare_usd >= 0),
+    CHECK (standard_per_stop_rate_usd >= 0),
     CHECK (first_base_fare_usd >= 0),
+    CHECK (first_per_stop_rate_usd >= 0),
     CHECK (frequency_min > 0)
 );
 
@@ -144,7 +146,8 @@ CREATE TABLE national_rail_seats (
     seat_column VARCHAR(2) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (schedule_id, seat_id),
-    CHECK (seat_row > 0)
+    CHECK (seat_row > 0),
+    CHECK (fare_class IN ('standard', 'first'))
 );
 
 -- ============================================================
@@ -273,7 +276,6 @@ CREATE TABLE feedback (
 -- ============================================================
 
 -- User Indexes
-CREATE INDEX idx_users_email ON registered_users(email);
 CREATE INDEX idx_users_active ON registered_users(is_active);
 
 -- National Rail Booking Indexes
