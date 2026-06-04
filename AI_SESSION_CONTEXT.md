@@ -154,8 +154,7 @@ CREATE TABLE national_rail_seats (
 -- Registered Users (Basic Information)
 CREATE TABLE registered_users (
     user_id VARCHAR(10) PRIMARY KEY,
-    first_name VARCHAR(100) NOT NULL,
-    surname VARCHAR(100) NOT NULL,
+    full_name VARCHAR(200) NOT NULL,
     email VARCHAR(100) NOT NULL UNIQUE,
     phone VARCHAR(20),
     date_of_birth DATE,
@@ -283,15 +282,15 @@ CREATE INDEX idx_bookings_travel_date ON national_rail_bookings(travel_date);
 CREATE INDEX idx_bookings_status ON national_rail_bookings(status);
 CREATE INDEX idx_bookings_schedule ON national_rail_bookings(schedule_id);
 CREATE INDEX idx_bookings_user_date ON national_rail_bookings(user_id, travel_date);
-CREATE INDEX idx_bookings_origin ON national_rail_bookings(origin_id);
-CREATE INDEX idx_bookings_destination ON national_rail_bookings(destination_id);
+CREATE INDEX idx_bookings_origin ON national_rail_bookings(origin_station_id);
+CREATE INDEX idx_bookings_destination ON national_rail_bookings(destination_station_id);
 
 -- Metro Travel Indexes
 CREATE INDEX idx_metro_travel_user ON metro_travel_history(user_id);
 CREATE INDEX idx_metro_travel_date ON metro_travel_history(travel_date);
 CREATE INDEX idx_metro_travel_schedule ON metro_travel_history(schedule_id);
-CREATE INDEX idx_metro_travel_origin ON metro_travel_history(origin_id);
-CREATE INDEX idx_metro_travel_destination ON metro_travel_history(destination_id);
+CREATE INDEX idx_metro_travel_origin ON metro_travel_history(origin_station_id);
+CREATE INDEX idx_metro_travel_destination ON metro_travel_history(destination_station_id);
 
 -- Payment Indexes (Both FK columns)
 CREATE INDEX idx_payments_booking ON payments(national_rail_booking_id);
@@ -307,12 +306,12 @@ CREATE INDEX idx_feedback_rating ON feedback(rating);
 
 -- Schedule Indexes
 CREATE INDEX idx_metro_schedules_line ON metro_schedules(line);
-CREATE INDEX idx_metro_schedules_origin ON metro_schedules(origin_id);
-CREATE INDEX idx_metro_schedules_destination ON metro_schedules(destination_id);
+CREATE INDEX idx_metro_schedules_origin ON metro_schedules(origin_station_id);
+CREATE INDEX idx_metro_schedules_destination ON metro_schedules(destination_station_id);
 
 CREATE INDEX idx_rail_schedules_line ON national_rail_schedules(line);
-CREATE INDEX idx_rail_schedules_origin ON national_rail_schedules(origin_id);
-CREATE INDEX idx_rail_schedules_destination ON national_rail_schedules(destination_id);
+CREATE INDEX idx_rail_schedules_origin ON national_rail_schedules(origin_station_id);
+CREATE INDEX idx_rail_schedules_destination ON national_rail_schedules(destination_station_id);
 CREATE INDEX idx_rail_schedules_service_type ON national_rail_schedules(service_type);
 
 -- Seat Indexes
@@ -347,8 +346,7 @@ COMMENT ON COLUMN national_rail_schedules.passed_through_stations IS 'Stations p
 COMMENT ON COLUMN user_credentials.password_hash IS 'argon2id hash (time_cost=2, memory_cost=65536, parallelism=2)';
 COMMENT ON COLUMN payments.national_rail_booking_id IS 'FK to national_rail_bookings (mutually exclusive with metro_trip_id)';
 COMMENT ON COLUMN payments.metro_trip_id IS 'FK to metro_travel_history (mutually exclusive with national_rail_booking_id)';
-COMMENT ON COLUMN registered_users.first_name IS 'User first name (matches register_user function signature)';
-COMMENT ON COLUMN registered_users.surname IS 'User surname (matches register_user function signature)';
+COMMENT ON COLUMN registered_users.full_name IS 'Full display name (matches full_name field in registered_users.json mock data)';
 COMMENT ON COLUMN registered_users.date_of_birth IS 'Full date of birth (year_of_birth converted to YYYY-01-01 in Python)';
 
 -- ============================================================
@@ -485,7 +483,7 @@ def query_station_connections(station_id: str) -> list[dict]: ...
 
 ### **Schema Design Decisions**
 
-- [ ] **User Name Fields**: Split into `first_name` and `surname` instead of single `full_name`. Why: Matches `register_user()` function signature in AI_SESSION_CONTEXT.md; enables proper name sorting and formatting.
+- [ ] **User Name Fields**: Single `full_name VARCHAR(200)` column. Why: Matches `full_name` field in `registered_users.json` mock data and `agent.py` usage of `profile['full_name']`. The `register_user()` function still accepts `first_name` and `surname` separately and concatenates them on insert.
 
 - [ ] **Primary Key Strategy**: Mixed approach — Natural keys for infrastructure (MS01, NR_SCH01), App-generated for transactions (BK-XXXXXX, MT-XXXXXX), SERIAL for internal tables. Why: Natural keys are human-readable and stable; app-generated IDs prevent information leakage; SERIAL simplifies internal references.
 
