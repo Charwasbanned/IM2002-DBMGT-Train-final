@@ -108,7 +108,9 @@ CREATE TABLE national_rail_schedules (
     operates_on TEXT[] NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CHECK (standard_base_fare_usd >= 0),
+    CHECK (standard_per_stop_rate_usd >= 0),
     CHECK (first_base_fare_usd >= 0),
+    CHECK (first_per_stop_rate_usd >= 0),
     CHECK (frequency_min > 0)
 );
 
@@ -122,7 +124,8 @@ CREATE TABLE national_rail_seats (
     seat_column VARCHAR(2) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (schedule_id, seat_id),
-    CHECK (seat_row > 0)
+    CHECK (seat_row > 0),
+    CHECK (fare_class IN ('standard', 'first'))
 );
 
 -- ============================================================
@@ -132,8 +135,7 @@ CREATE TABLE national_rail_seats (
 -- Registered Users (Basic Information)
 CREATE TABLE registered_users (
     user_id VARCHAR(10) PRIMARY KEY,
-    first_name VARCHAR(100) NOT NULL,
-    surname VARCHAR(100) NOT NULL,
+    full_name VARCHAR(200) NOT NULL,
     email VARCHAR(100) NOT NULL UNIQUE,
     phone VARCHAR(20),
     date_of_birth DATE,
@@ -252,7 +254,6 @@ CREATE TABLE feedback (
 -- ============================================================
 
 -- User Indexes
-CREATE INDEX idx_users_email ON registered_users(email);
 CREATE INDEX idx_users_active ON registered_users(is_active);
 
 -- National Rail Booking Indexes
@@ -325,8 +326,7 @@ COMMENT ON COLUMN national_rail_schedules.passed_through_stations IS 'Stations p
 COMMENT ON COLUMN user_credentials.password_hash IS 'argon2id hash (time_cost=2, memory_cost=65536, parallelism=2)';
 COMMENT ON COLUMN payments.national_rail_booking_id IS 'FK to national_rail_bookings (mutually exclusive with metro_trip_id)';
 COMMENT ON COLUMN payments.metro_trip_id IS 'FK to metro_travel_history (mutually exclusive with national_rail_booking_id)';
-COMMENT ON COLUMN registered_users.first_name IS 'User first name (matches register_user function signature)';
-COMMENT ON COLUMN registered_users.surname IS 'User surname (matches register_user function signature)';
+COMMENT ON COLUMN registered_users.full_name IS 'Full display name (matches full_name field in registered_users.json mock data)';
 COMMENT ON COLUMN registered_users.date_of_birth IS 'Full date of birth (year_of_birth converted to YYYY-01-01 in Python)';
 
 -- ============================================================
