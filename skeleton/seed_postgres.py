@@ -185,14 +185,10 @@ def seed_users(cur):
     ph = PasswordHasher()
     for u in data:
         user_id = u.get("user_id")
-        full = u.get("full_name", "")
-        parts = full.split()
-        first = parts[0] if parts else None
-        surname = parts[-1] if len(parts) > 1 else ""
+        full_name = u.get("full_name")
         user_rows.append((
             user_id,
-            first,
-            surname,
+            full_name,
             u.get("email"),
             u.get("phone"),
             u.get("date_of_birth"),
@@ -219,7 +215,7 @@ def seed_users(cur):
         ))
 
     inserted_users = insert_many(cur, "registered_users",
-                                 ["user_id", "first_name", "surname", "email", "phone", "date_of_birth", "registered_at", "is_active"],
+                                 ["user_id", "full_name", "email", "phone", "date_of_birth", "registered_at", "is_active"],
                                  user_rows)
     print(f"  registered_users: inserted {inserted_users}")
 

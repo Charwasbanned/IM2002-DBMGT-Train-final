@@ -202,7 +202,7 @@ CREATE TABLE metro_travel_history (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CHECK (amount_usd >= 0),
     CHECK (stops_travelled IS NULL OR stops_travelled > 0),
-    CHECK (status IN ('completed', 'canceled')),
+    CHECK (status IN ('completed', 'cancelled')),
     CHECK (ticket_type IN ('single', 'day_pass'))
 );
 
