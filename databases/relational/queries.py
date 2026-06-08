@@ -95,7 +95,7 @@ def query_national_rail_availability(
             query += " AND %s = ANY(operates_on)"
             params.append(day_of_week)
         except ValueError:
-            return []
+            pass  # ignore unparseable date, return all matching schedules
 
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
