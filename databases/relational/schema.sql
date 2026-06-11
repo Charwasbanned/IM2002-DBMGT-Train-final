@@ -33,6 +33,8 @@
 
 -- Metro Stations (20 stations across 4 lines)
 CREATE TABLE metro_stations (
+    -- Using natural key (VARCHAR) over SERIAL/UUID: station IDs are human-readable codes
+    -- (MS01-MS20) already stable in source data; avoids surrogate key lookup overhead.
     station_id VARCHAR(10) PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     lines TEXT[] NOT NULL,
@@ -44,6 +46,7 @@ CREATE TABLE metro_stations (
 
 -- National Rail Stations (10 stations across 2 lines)
 CREATE TABLE national_rail_stations (
+    -- Same rationale as metro_stations: natural VARCHAR key from source data.
     station_id VARCHAR(10) PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     lines TEXT[] NOT NULL,
@@ -53,26 +56,39 @@ CREATE TABLE national_rail_stations (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Add foreign key constraints for interchange stations
+-- Add foreign key constraints for interchange stations.
+-- DEFERRABLE INITIALLY DEFERRED: the two tables reference each other (circular FK),
+-- so constraints must be checked at commit time rather than per-statement.
+-- ON DELETE RESTRICT: an interchange station cannot be removed while the cross-reference exists.
 ALTER TABLE metro_stations
     ADD CONSTRAINT fk_metro_interchange_rail
     FOREIGN KEY (interchange_national_rail_station_id)
     REFERENCES national_rail_stations(station_id)
+    ON DELETE RESTRICT
     DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE national_rail_stations
     ADD CONSTRAINT fk_rail_interchange_metro
     FOREIGN KEY (interchange_metro_station_id)
     REFERENCES metro_stations(station_id)
+    ON DELETE RESTRICT
     DEFERRABLE INITIALLY DEFERRED;
 
 -- Metro Schedules (8 schedules for 4 lines)
 CREATE TABLE metro_schedules (
+    -- Natural key from source JSON; RESTRICT prevents deleting a station while schedules exist.
     schedule_id VARCHAR(20) PRIMARY KEY,
     line VARCHAR(10) NOT NULL,
     direction VARCHAR(20) NOT NULL,
-    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
-    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    -- Design decision: TEXT[] over a junction table for stop sequences.
+    -- Rationale: (1) Stop data is static after seeding — no per-stop inserts/deletes.
+    -- (2) Containment queries (ANY operator) are indexed with GIN, performing comparably
+    -- to B-tree joins at this dataset size (16 schedules, ≤10 stops each).
+    -- (3) Eliminates a JOIN on every schedule lookup, which is the hottest query path.
+    -- A junction table would be preferable if per-stop metadata (arrival_time, platform)
+    -- were needed, but the current data model does not require it.
     stops_in_order TEXT[] NOT NULL,
     first_train_time TIME NOT NULL,
     last_train_time TIME NOT NULL,
@@ -89,12 +105,14 @@ CREATE TABLE metro_schedules (
 
 -- National Rail Schedules (8 schedules: 4 normal + 4 express)
 CREATE TABLE national_rail_schedules (
+    -- Natural key from source JSON; RESTRICT prevents deleting a station while schedules reference it.
     schedule_id VARCHAR(20) PRIMARY KEY,
     line VARCHAR(10) NOT NULL,
     service_type VARCHAR(20) NOT NULL,
     direction VARCHAR(20) NOT NULL,
-    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
-    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
+    -- Same array design decision as metro_schedules (see comment above).
     stops_in_order TEXT[] NOT NULL,
     passed_through_stations TEXT[],
     first_train_time TIME NOT NULL,
@@ -116,7 +134,8 @@ CREATE TABLE national_rail_schedules (
 
 -- National Rail Seats (Flattened structure - 1 table)
 CREATE TABLE national_rail_seats (
-    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id),
+    -- CASCADE: seat layout is meaningless without its parent schedule.
+    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
     seat_id VARCHAR(10) NOT NULL,
     coach VARCHAR(5) NOT NULL,
     fare_class VARCHAR(20) NOT NULL,
@@ -133,14 +152,18 @@ CREATE TABLE national_rail_seats (
 -- ============================================================
 
 -- Registered Users (Basic Information)
+-- Delete strategy: SOFT DELETE via is_active flag. Users are never physically removed
+-- so booking history and payment records remain intact for auditing and compliance.
 CREATE TABLE registered_users (
+    -- App-generated VARCHAR key (U + 7 chars) chosen over SERIAL/UUID so IDs are
+    -- short, human-readable in support tickets, and decoupled from insertion order.
     user_id VARCHAR(10) PRIMARY KEY,
     full_name VARCHAR(200) NOT NULL,
     email VARCHAR(100) NOT NULL UNIQUE,
     phone VARCHAR(20),
     date_of_birth DATE,
     registered_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    is_active BOOLEAN DEFAULT TRUE,
+    is_active BOOLEAN DEFAULT TRUE,  -- soft delete: set FALSE instead of deleting row
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -160,11 +183,13 @@ CREATE TABLE user_credentials (
 
 -- National Rail Bookings
 CREATE TABLE national_rail_bookings (
+    -- App-generated ID (BK-XXXXXX) over SERIAL: human-readable reference for customer support.
+    -- RESTRICT on user/schedule: booking history must be preserved even if station config changes.
     booking_id VARCHAR(20) PRIMARY KEY,
-    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id),
-    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id),
-    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
-    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
+    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id) ON DELETE RESTRICT,
+    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id) ON DELETE RESTRICT,
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
     travel_date DATE NOT NULL,
     departure_time TIME NOT NULL,
     ticket_type VARCHAR(20) NOT NULL,
@@ -186,11 +211,12 @@ CREATE TABLE national_rail_bookings (
 
 -- Metro Travel History
 CREATE TABLE metro_travel_history (
+    -- App-generated ID (MT-XXXXXX); RESTRICT prevents orphaning trip records.
     trip_id VARCHAR(20) PRIMARY KEY,
-    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id),
-    schedule_id VARCHAR(20) NOT NULL REFERENCES metro_schedules(schedule_id),
-    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
-    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
+    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id) ON DELETE RESTRICT,
+    schedule_id VARCHAR(20) NOT NULL REFERENCES metro_schedules(schedule_id) ON DELETE RESTRICT,
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
     travel_date DATE NOT NULL,
     ticket_type VARCHAR(20) NOT NULL,
     day_pass_ref VARCHAR(20),
@@ -215,9 +241,11 @@ ALTER TABLE metro_travel_history
 
 -- Payments (Separate FK Columns for Polymorphic Association)
 CREATE TABLE payments (
+    -- RESTRICT: payment records must survive even if booking status changes; deletion
+    -- requires explicit cleanup, preventing accidental loss of financial audit trail.
     payment_id VARCHAR(20) PRIMARY KEY,
-    national_rail_booking_id VARCHAR(20) REFERENCES national_rail_bookings(booking_id),
-    metro_trip_id VARCHAR(20) REFERENCES metro_travel_history(trip_id),
+    national_rail_booking_id VARCHAR(20) REFERENCES national_rail_bookings(booking_id) ON DELETE RESTRICT,
+    metro_trip_id VARCHAR(20) REFERENCES metro_travel_history(trip_id) ON DELETE RESTRICT,
     amount_usd NUMERIC(10,2) NOT NULL,
     method VARCHAR(20) NOT NULL,
     status VARCHAR(20) NOT NULL,
@@ -234,10 +262,13 @@ CREATE TABLE payments (
 
 -- Feedback (Separate FK Columns for Polymorphic Association)
 CREATE TABLE feedback (
+    -- RESTRICT on all FKs: the mutual-exclusivity CHECK requires exactly one FK to be NOT NULL.
+    -- SET NULL would leave both columns NULL on booking deletion, violating that CHECK.
+    -- Keeping RESTRICT also preserves the full feedback record for service quality auditing.
     feedback_id VARCHAR(20) PRIMARY KEY,
-    national_rail_booking_id VARCHAR(20) REFERENCES national_rail_bookings(booking_id),
-    metro_trip_id VARCHAR(20) REFERENCES metro_travel_history(trip_id),
-    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id),
+    national_rail_booking_id VARCHAR(20) REFERENCES national_rail_bookings(booking_id) ON DELETE RESTRICT,
+    metro_trip_id VARCHAR(20) REFERENCES metro_travel_history(trip_id) ON DELETE RESTRICT,
+    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id) ON DELETE RESTRICT,
     rating INTEGER NOT NULL,
     comment TEXT,
     submitted_at TIMESTAMP WITH TIME ZONE NOT NULL,

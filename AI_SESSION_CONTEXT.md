@@ -558,10 +558,10 @@ def query_station_connections(station_id: str) -> list[dict]: ...
 
 ### Schema design prompt that worked:
 ```
-TODO — add a prompt here after your schema design workshop
+
 ```
 
 ### Query implementation prompt that worked:
 ```
-TODO — add after implementing your first function
+
 ```
