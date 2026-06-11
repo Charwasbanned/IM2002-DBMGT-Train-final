@@ -626,6 +626,9 @@ def register_user(
 
     NOTE: passwords are stored as plain text here intentionally for teaching
     purposes. In production, replace with a salted hash (e.g. bcrypt).
+
+    Implementation: passwords and secret answers are hashed with argon2id
+    (time_cost=2, memory_cost=65536, parallelism=2) as specified in the assignment.
     """
     conn = _connect()
     conn.autocommit = False
