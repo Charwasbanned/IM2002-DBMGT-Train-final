@@ -263,15 +263,18 @@ def query_available_seats(
         List of dicts: {seat_id, coach, row, column}
     """
     fare_class = fare_class.lower()
+    # NOT IN subquery is used instead of LEFT JOIN / IS NULL because the seat count
+    # is small (<100 per schedule), making the subquery plan equally efficient while
+    # keeping the intent — "exclude already-booked seats" — more readable.
     query = """
         SELECT s.seat_id, s.coach, s.fare_class, s.seat_row, s.seat_column
         FROM national_rail_seats s
         WHERE s.schedule_id = %s AND s.fare_class = %s
           AND s.seat_id NOT IN (
-              SELECT b.seat_id 
+              SELECT b.seat_id
               FROM national_rail_bookings b
-              WHERE b.schedule_id = %s 
-                AND b.travel_date = %s 
+              WHERE b.schedule_id = %s
+                AND b.travel_date = %s
                 AND b.status IN ('confirmed', 'completed')
           )
         ORDER BY s.coach, s.seat_row, s.seat_column
@@ -312,7 +315,9 @@ def auto_select_adjacent_seats(available_seats: list[dict], count: int) -> list[
 def query_user_profile(user_email: str) -> Optional[dict]:
     """Return a user's profile by email."""
     query = """
-        SELECT user_id, full_name, email, phone, date_of_birth, registered_at, is_active
+        SELECT user_id, full_name, email, phone, date_of_birth,
+               EXTRACT(YEAR FROM date_of_birth)::INTEGER AS year_of_birth,
+               registered_at, is_active
         FROM registered_users
         WHERE email = %s
     """
@@ -423,6 +428,9 @@ def execute_booking(
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Lock the seat row first to prevent double-booking under concurrent requests.
+            # FOR UPDATE holds the row lock until conn.commit(), so a second transaction
+            # attempting the same seat will block here rather than creating a conflict.
             lock_query = """
                 SELECT coach FROM national_rail_seats
                 WHERE schedule_id = %s AND seat_id = %s
@@ -434,6 +442,8 @@ def execute_booking(
                 return False, f"Seat {seat_id} does not exist on this schedule."
             coach = seat_row["coach"]
 
+            # Re-check availability after acquiring the lock: another transaction may
+            # have committed a booking between the initial availability check and now.
             booked_query = """
                 SELECT 1 FROM national_rail_bookings
                 WHERE schedule_id = %s AND travel_date = %s AND seat_id = %s
@@ -495,6 +505,8 @@ def execute_booking(
             """
             cur.execute(insert_payment, (pay_id, booking_id, amount_usd))
 
+        # Both INSERT statements are committed atomically: if the payment insert fails,
+        # the booking insert is also rolled back so we never have an unpaid booking.
         conn.commit()
         return True, new_booking
 
@@ -540,7 +552,9 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
             if booking["status"] in ("cancelled", "refunded"):
                 return False, "Booking is already cancelled or refunded."
 
-            # Calculate hours until departure
+            # Calculate hours until departure to determine which refund window applies.
+            # datetime.combine merges the DATE and TIME columns from PostgreSQL into a
+            # single datetime; no timezone info is used here since all stored times are local.
             departure_dt = datetime.combine(booking["travel_date"], booking["departure_time"])
             hours_until = (departure_dt - datetime.now()).total_seconds() / 3600
 
@@ -612,6 +626,9 @@ def register_user(
 
     NOTE: passwords are stored as plain text here intentionally for teaching
     purposes. In production, replace with a salted hash (e.g. bcrypt).
+
+    Implementation: passwords and secret answers are hashed with argon2id
+    (time_cost=2, memory_cost=65536, parallelism=2) as specified in the assignment.
     """
     conn = _connect()
     conn.autocommit = False
@@ -630,7 +647,7 @@ def register_user(
                 INSERT INTO user_credentials (user_id, password_hash, secret_question, secret_answer_hash)
                 VALUES (%s, %s, %s, %s)
             """
-            cur.execute(insert_cred, (user_id, ph.hash(password), secret_question, ph.hash(secret_answer)))
+            cur.execute(insert_cred, (user_id, ph.hash(password), secret_question, ph.hash(secret_answer.lower())))
 
         conn.commit()
         return True, user_id
@@ -705,7 +722,7 @@ def verify_secret_answer(email: str, answer: str) -> bool:
             if not row:
                 return False
             try:
-                ph.verify(row[0], answer)
+                ph.verify(row[0], answer.lower())
                 return True
             except VerifyMismatchError:
                 return False

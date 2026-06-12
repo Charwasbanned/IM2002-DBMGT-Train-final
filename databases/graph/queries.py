@@ -22,8 +22,6 @@ Functions prefixed with `query_` are called by the agent (skeleton/agent.py).
 
 from __future__ import annotations
 
-from typing import Optional
-
 from neo4j import GraphDatabase
 
 from skeleton.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
@@ -80,6 +78,8 @@ def query_shortest_route(
                 f"""
                 MATCH (start:{label} {{station_id: $origin}})
                 MATCH (end:{label}   {{station_id: $destination}})
+                // apoc.algo.dijkstra minimises sum of travel_time_min, giving the
+                // true time-optimal path rather than the fewest-hop (shortestPath) path.
                 CALL apoc.algo.dijkstra(start, end, '{rel_type}', 'travel_time_min')
                 YIELD path, weight
                 RETURN
@@ -416,6 +416,24 @@ def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
     """
     with _driver() as driver:
         with driver.session() as session:
+            # hops=0 is a special case: return only the disrupted station itself.
+            # The variable-length pattern *1..N is invalid when N=0, so we handle it separately.
+            if hops == 0:
+                result = session.run(
+                    "MATCH (s {station_id: $station_id}) "
+                    "RETURN s.station_id AS station_id, s.name AS name, s.lines AS lines_affected",
+                    station_id=delayed_station_id,
+                )
+                row = result.single()
+                if not row:
+                    return []
+                return [{
+                    "station_id":     row["station_id"],
+                    "name":           row["name"],
+                    "hops_away":      0,
+                    "lines_affected": list(row["lines_affected"]) if row["lines_affected"] else [],
+                }]
+
             # hops is a trusted integer, safe to embed directly in the query
             result = session.run(
                 f"""

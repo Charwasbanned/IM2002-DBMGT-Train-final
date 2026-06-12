@@ -77,24 +77,30 @@ CREATE TABLE national_rail_stations (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Add foreign key constraints for interchange stations
+-- Add foreign key constraints for interchange stations.
+-- DEFERRABLE INITIALLY DEFERRED: these two tables reference each other (circular FK),
+-- so constraints are checked at commit time rather than per-statement.
 ALTER TABLE metro_stations
     ADD CONSTRAINT fk_metro_interchange_rail
     FOREIGN KEY (interchange_national_rail_station_id)
-    REFERENCES national_rail_stations(station_id);
+    REFERENCES national_rail_stations(station_id)
+    ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE national_rail_stations
     ADD CONSTRAINT fk_rail_interchange_metro
     FOREIGN KEY (interchange_metro_station_id)
-    REFERENCES metro_stations(station_id);
+    REFERENCES metro_stations(station_id)
+    ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED;
 
 -- Metro Schedules (8 schedules for 4 lines)
 CREATE TABLE metro_schedules (
     schedule_id VARCHAR(20) PRIMARY KEY,
     line VARCHAR(10) NOT NULL,
     direction VARCHAR(20) NOT NULL,
-    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
-    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
     stops_in_order TEXT[] NOT NULL,
     first_train_time TIME NOT NULL,
     last_train_time TIME NOT NULL,
@@ -115,8 +121,8 @@ CREATE TABLE national_rail_schedules (
     line VARCHAR(10) NOT NULL,
     service_type VARCHAR(20) NOT NULL,
     direction VARCHAR(20) NOT NULL,
-    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
-    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
     stops_in_order TEXT[] NOT NULL,
     passed_through_stations TEXT[],
     first_train_time TIME NOT NULL,
@@ -138,7 +144,7 @@ CREATE TABLE national_rail_schedules (
 
 -- National Rail Seats (Flattened structure - 1 table)
 CREATE TABLE national_rail_seats (
-    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id),
+    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
     seat_id VARCHAR(10) NOT NULL,
     coach VARCHAR(5) NOT NULL,
     fare_class VARCHAR(20) NOT NULL,
@@ -183,10 +189,10 @@ CREATE TABLE user_credentials (
 -- National Rail Bookings
 CREATE TABLE national_rail_bookings (
     booking_id VARCHAR(20) PRIMARY KEY,
-    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id),
-    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id),
-    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
-    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
+    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id) ON DELETE RESTRICT,
+    schedule_id VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id) ON DELETE RESTRICT,
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
     travel_date DATE NOT NULL,
     departure_time TIME NOT NULL,
     ticket_type VARCHAR(20) NOT NULL,
@@ -209,10 +215,10 @@ CREATE TABLE national_rail_bookings (
 -- Metro Travel History
 CREATE TABLE metro_travel_history (
     trip_id VARCHAR(20) PRIMARY KEY,
-    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id),
-    schedule_id VARCHAR(20) NOT NULL REFERENCES metro_schedules(schedule_id),
-    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
-    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
+    user_id VARCHAR(10) NOT NULL REFERENCES registered_users(user_id) ON DELETE RESTRICT,
+    schedule_id VARCHAR(20) NOT NULL REFERENCES metro_schedules(schedule_id) ON DELETE RESTRICT,
+    origin_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
     travel_date DATE NOT NULL,
     ticket_type VARCHAR(20) NOT NULL,
     day_pass_ref VARCHAR(20),
@@ -224,7 +230,7 @@ CREATE TABLE metro_travel_history (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CHECK (amount_usd >= 0),
     CHECK (stops_travelled IS NULL OR stops_travelled > 0),
-    CHECK (status IN ('completed', 'refunded')),
+    CHECK (status IN ('completed', 'cancelled')),
     CHECK (ticket_type IN ('single', 'day_pass'))
 );
 
@@ -420,9 +426,9 @@ Relationship types:
                      MS15 (Ferndale)        ↔  NR07 (Ferndale Halt)
 
 Constraints:
-  CREATE CONSTRAINT metro_station_unique
+  CREATE CONSTRAINT metro_station_unique IF NOT EXISTS
     FOR (s:MetroStation) REQUIRE s.station_id IS UNIQUE;
-  CREATE CONSTRAINT rail_station_unique
+  CREATE CONSTRAINT rail_station_unique IF NOT EXISTS
     FOR (s:NationalRailStation) REQUIRE s.station_id IS UNIQUE;
 
 Path-finding notes for query implementation:
@@ -558,10 +564,10 @@ def query_station_connections(station_id: str) -> list[dict]: ...
 
 ### Schema design prompt that worked:
 ```
-TODO — add a prompt here after your schema design workshop
+
 ```
 
 ### Query implementation prompt that worked:
 ```
-TODO — add after implementing your first function
+
 ```

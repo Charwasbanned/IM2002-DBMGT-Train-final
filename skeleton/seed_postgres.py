@@ -57,8 +57,6 @@ def insert_many(cur, table, columns, rows):
 
 def seed_metro_stations(cur):
     data = load("metro_stations.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
-    # Each item in `data` is a dict — inspect the JSON to see available fields.
     rows = []
     for s in data:
         rows.append((
@@ -77,7 +75,6 @@ def seed_metro_stations(cur):
 
 def seed_national_rail_stations(cur):
     data = load("national_rail_stations.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
     rows = []
     for s in data:
         rows.append((
@@ -96,7 +93,6 @@ def seed_national_rail_stations(cur):
 
 def seed_metro_schedules(cur):
     data = load("metro_schedules.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
     rows = []
     for s in data:
         rows.append((
@@ -122,7 +118,6 @@ def seed_metro_schedules(cur):
 
 def seed_national_rail_schedules(cur):
     data = load("national_rail_schedules.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
     rows = []
     for s in data:
         fare_classes = s.get("fare_classes", {})
@@ -155,7 +150,6 @@ def seed_national_rail_schedules(cur):
 
 def seed_seat_layouts(cur):
     data = load("national_rail_seat_layouts.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
     rows = []
     for layout in data:
         schedule_id = layout.get("schedule_id")
@@ -179,7 +173,6 @@ def seed_seat_layouts(cur):
 
 def seed_users(cur):
     data = load("registered_users.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
     user_rows = []
     cred_rows = []
     ph = PasswordHasher()
@@ -202,7 +195,7 @@ def seed_users(cur):
             pwd_hash = ph.hash(pwd)
         except Exception:
             pwd_hash = None
-        secret_answer = u.get("secret_answer") or ""
+        secret_answer = (u.get("secret_answer") or "").lower()
         try:
             secret_hash = ph.hash(secret_answer)
         except Exception:
@@ -227,7 +220,6 @@ def seed_users(cur):
 
 def seed_national_rail_bookings(cur):
     data = load("bookings.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
     rows = []
     for b in data:
         rows.append((
@@ -256,7 +248,6 @@ def seed_national_rail_bookings(cur):
 
 def seed_metro_travels(cur):
     data = load("metro_travel_history.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
     rows = []
     for t in data:
         rows.append((
@@ -282,7 +273,6 @@ def seed_metro_travels(cur):
 
 def seed_payments(cur):
     data = load("payments.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
     rows = []
     for p in data:
         booking_ref = p.get("booking_id") or p.get("booking")
@@ -312,7 +302,6 @@ def seed_payments(cur):
 
 def seed_feedback(cur):
     data = load("feedback.json")
-    # TODO: Design your table schema, then implement the INSERT logic here.
     rows = []
     for f in data:
         booking_ref = f.get("booking_id")
